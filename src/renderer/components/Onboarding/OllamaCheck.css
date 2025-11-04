@@ -1,0 +1,104 @@
+.ollama-check {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ollama-check p {
+  margin: 0;
+}
+
+.error-text {
+  color: #e74c3c;
+  font-weight: 500;
+}
+
+.success-text {
+  color: #27ae60;
+  font-weight: 500;
+}
+
+.ollama-check ol {
+  margin: 16px 0;
+  padding-left: 24px;
+}
+
+.ollama-check ol li {
+  margin: 8px 0;
+  line-height: 1.6;
+}
+
+.ollama-check code {
+  background: #f4f4f4;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'Monaco', 'Courier New', monospace;
+  font-size: 14px;
+}
+
+.ollama-check a {
+  color: #4a90e2;
+  text-decoration: none;
+}
+
+.ollama-check a:hover {
+  text-decoration: underline;
+}
+
+.spinner {
+  border: 3px solid #f3f3f3;
+  border-top: 3px solid #4a90e2;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  animation: spin 1s linear infinite;
+  margin: 20px auto;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.model-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.model-selector label {
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.model-selector select {
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.ollama-check button {
+  padding: 12px 24px;
+  border: none;
+  border-radius: 6px;
+  font-size: 16px;
+  cursor: pointer;
+  background: #4a90e2;
+  color: white;
+  transition: background 0.2s;
+}
+
+.ollama-check button:hover {
+  background: #357abd;
+}
+
+.skip-button {
+  background: #e0e0e0 !important;
+  color: #333 !important;
+}
+
+.skip-button:hover {
+  background: #d0d0d0 !important;
+}
+

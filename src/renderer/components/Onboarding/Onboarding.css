@@ -1,0 +1,104 @@
+.onboarding {
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+.onboarding-content {
+  background: white;
+  border-radius: 12px;
+  padding: 40px;
+  max-width: 600px;
+  width: 90%;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+}
+
+.onboarding-step h1 {
+  font-size: 28px;
+  margin-bottom: 16px;
+  color: #333;
+}
+
+.onboarding-step h2 {
+  font-size: 24px;
+  margin-bottom: 16px;
+  color: #333;
+}
+
+.onboarding-step p {
+  font-size: 16px;
+  color: #666;
+  margin-bottom: 24px;
+  line-height: 1.6;
+}
+
+.option-group {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.option-group label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.option-group label:hover {
+  border-color: #4a90e2;
+  background: #f0f4ff;
+}
+
+.option-group input[type="radio"] {
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+}
+
+.button-group {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.button-group button,
+.onboarding-step button {
+  padding: 12px 24px;
+  border: none;
+  border-radius: 6px;
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.button-group button:first-child,
+.onboarding-step button:first-child {
+  background: #e0e0e0;
+  color: #333;
+}
+
+.button-group button:first-child:hover,
+.onboarding-step button:first-child:hover {
+  background: #d0d0d0;
+}
+
+.button-group button:last-child,
+.onboarding-step button:last-child {
+  background: #4a90e2;
+  color: white;
+}
+
+.button-group button:last-child:hover,
+.onboarding-step button:last-child:hover {
+  background: #357abd;
+}
+
