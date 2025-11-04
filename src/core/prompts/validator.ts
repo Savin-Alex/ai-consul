@@ -98,8 +98,9 @@ export class OutputValidator {
     const suggestions: string[] = [];
 
     for (const line of lines) {
-      // Match bullet points, numbered lists, or dashes
-      const match = line.match(/^[-•*\d+\.]\s*(.+)/);
+      const trimmedLine = line.trim();
+      // Match bullet points, numbered lists, or dashes (with optional leading whitespace)
+      const match = trimmedLine.match(/^[-•*\d+\.]\s+(.+)$/);
       if (match) {
         const suggestion = match[1].trim();
         const words = suggestion.split(/\s+/);

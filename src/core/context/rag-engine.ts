@@ -73,7 +73,7 @@ export class RAGEngine {
     const queryWords = query
       .toLowerCase()
       .split(/\s+/)
-      .filter((w) => w.length > 3);
+      .filter((w) => w.length >= 3); // Include words 3+ chars
 
     for (const [source, chunks] of this.documents.entries()) {
       for (const chunk of chunks) {

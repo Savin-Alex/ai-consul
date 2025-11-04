@@ -7,30 +7,32 @@ const mockedAxios = vi.mocked(axios);
 
 describe('LocalLLM', () => {
   let localLLM: LocalLLM;
+  let mockAxiosInstance: any;
 
   beforeEach(() => {
+    // Create a mock axios instance before LocalLLM constructor runs
+    mockAxiosInstance = {
+      get: vi.fn(),
+      post: vi.fn(),
+    };
+    
+    mockedAxios.create = vi.fn(() => mockAxiosInstance) as any;
+    
     localLLM = new LocalLLM();
     vi.clearAllMocks();
   });
 
   describe('checkConnection', () => {
     it('should return true when Ollama is running', async () => {
-      const mockGet = vi.fn().mockResolvedValue({ status: 200 });
-      mockedAxios.create = vi.fn(() => ({
-        get: mockGet,
-        post: vi.fn(),
-      })) as any;
+      mockAxiosInstance.get = vi.fn().mockResolvedValue({ status: 200 });
 
       const result = await localLLM.checkConnection();
       expect(result).toBe(true);
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/api/tags');
     });
 
     it('should return false when Ollama is not running', async () => {
-      const mockGet = vi.fn().mockRejectedValue(new Error('Connection refused'));
-      mockedAxios.create = vi.fn(() => ({
-        get: mockGet,
-        post: vi.fn(),
-      })) as any;
+      mockAxiosInstance.get = vi.fn().mockRejectedValue(new Error('Connection refused'));
 
       const result = await localLLM.checkConnection();
       expect(result).toBe(false);
@@ -46,22 +48,14 @@ describe('LocalLLM', () => {
         ],
       };
 
-      const mockGet = vi.fn().mockResolvedValue({ data: mockModels });
-      mockedAxios.create = vi.fn(() => ({
-        get: mockGet,
-        post: vi.fn(),
-      })) as any;
+      mockAxiosInstance.get = vi.fn().mockResolvedValue({ data: mockModels });
 
       const models = await localLLM.listModels();
       expect(models).toEqual(['llama3:8b', 'phi3:mini']);
     });
 
     it('should return empty array on error', async () => {
-      const mockGet = vi.fn().mockRejectedValue(new Error('Failed'));
-      mockedAxios.create = vi.fn(() => ({
-        get: mockGet,
-        post: vi.fn(),
-      })) as any;
+      mockAxiosInstance.get = vi.fn().mockRejectedValue(new Error('Failed'));
 
       const models = await localLLM.listModels();
       expect(models).toEqual([]);
@@ -74,29 +68,20 @@ describe('LocalLLM', () => {
         response: 'This is a generated response',
       };
 
-      const mockPost = vi.fn().mockResolvedValue({ data: mockResponse });
-      mockedAxios.create = vi.fn(() => ({
-        get: vi.fn(),
-        post: mockPost,
-      })) as any;
+      mockAxiosInstance.post = vi.fn().mockResolvedValue({ data: mockResponse });
 
       const result = await localLLM.generate('Test prompt', 'llama3:8b');
       expect(result).toBe('This is a generated response');
     });
 
     it('should include system prompt when provided', async () => {
-      const postSpy = vi.fn().mockResolvedValue({
+      mockAxiosInstance.post = vi.fn().mockResolvedValue({
         data: { response: 'Response' },
       });
 
-      mockedAxios.create = vi.fn(() => ({
-        get: vi.fn(),
-        post: postSpy,
-      })) as any;
-
       await localLLM.generate('User prompt', 'llama3:8b', 'System prompt');
       
-      expect(postSpy).toHaveBeenCalledWith(
+      expect(mockAxiosInstance.post).toHaveBeenCalledWith(
         '/api/generate',
         expect.objectContaining({
           prompt: 'System prompt\n\nUser prompt',
@@ -106,15 +91,10 @@ describe('LocalLLM', () => {
     });
 
     it('should throw error when Ollama is not running', async () => {
-      const mockPost = vi.fn().mockRejectedValue({
+      mockAxiosInstance.post = vi.fn().mockRejectedValue({
         code: 'ECONNREFUSED',
         message: 'Connection refused',
       });
-
-      mockedAxios.create = vi.fn(() => ({
-        get: vi.fn(),
-        post: mockPost,
-      })) as any;
 
       await expect(localLLM.generate('Test prompt')).rejects.toThrow(
         'Ollama is not running'

@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OutputValidator } from '../validator';
-// @ts-ignore
-import promptLibrary from '../../../../../ai_prompt_library_final_v2.1.json';
+import * as fs from 'fs';
+import * as path from 'path';
+
+const promptLibraryPath = path.join(__dirname, '../../../../ai_prompt_library_final_v2.1.json');
+const promptLibrary = JSON.parse(fs.readFileSync(promptLibraryPath, 'utf-8'));
 
 describe('OutputValidator', () => {
   let validator: OutputValidator;
@@ -65,8 +68,11 @@ describe('OutputValidator', () => {
 
       const result = validator.validate(llmResponse, 'job_interviews');
 
+      // The extractFromText should find bullet points
       expect(result.suggestions.length).toBeGreaterThan(0);
-      expect(result.suggestions[0]).toContain('team structure');
+      if (result.suggestions.length > 0) {
+        expect(result.suggestions[0]).toContain('team structure');
+      }
     });
 
     it('should handle invalid JSON gracefully', () => {

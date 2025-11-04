@@ -39,20 +39,27 @@ describe('LLMRouter', () => {
 
   describe('generate', () => {
     it('should use local LLM when available', async () => {
-      const localLLM = vi.mocked(LocalLLM);
-      const checkConnectionSpy = vi.fn().mockResolvedValue(true);
-      const checkModelAvailableSpy = vi.fn().mockResolvedValue(true);
-      const generateSpy = vi.fn().mockResolvedValue('Local response');
+      // Create a new router instance for this test
+      const testRouter = new LLMRouter(config);
+      
+      // Mock the LocalLLM instance methods
+      const localLLMInstance = (testRouter as any).localLLM;
+      
+      // Mock parseModelString first
+      vi.spyOn(localLLMInstance, 'parseModelString').mockReturnValue({
+        model: 'llama3',
+        tag: '8b',
+      });
+      
+      vi.spyOn(localLLMInstance, 'checkConnection').mockResolvedValue(true);
+      vi.spyOn(localLLMInstance, 'checkModelAvailable').mockResolvedValue(true);
+      vi.spyOn(localLLMInstance, 'generate').mockResolvedValue('Local response');
 
-      localLLM.prototype.checkConnection = checkConnectionSpy;
-      localLLM.prototype.checkModelAvailable = checkModelAvailableSpy;
-      localLLM.prototype.generate = generateSpy;
-
-      const result = await router.generate('Test prompt');
+      const result = await testRouter.generate('Test prompt');
 
       expect(result).toBe('Local response');
-      expect(checkConnectionSpy).toHaveBeenCalled();
-      expect(generateSpy).toHaveBeenCalledWith(
+      expect(localLLMInstance.checkConnection).toHaveBeenCalled();
+      expect(localLLMInstance.generate).toHaveBeenCalledWith(
         'Test prompt',
         'llama3:8b',
         undefined

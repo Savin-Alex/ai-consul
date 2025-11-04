@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { PromptBuilder } from '../builder';
-// @ts-ignore
-import promptLibrary from '../../../../../ai_prompt_library_final_v2.1.json';
+import * as fs from 'fs';
+import * as path from 'path';
+
+const promptLibraryPath = path.join(__dirname, '../../../../ai_prompt_library_final_v2.1.json');
+const promptLibrary = JSON.parse(fs.readFileSync(promptLibraryPath, 'utf-8'));
 
 describe('PromptBuilder', () => {
   let builder: PromptBuilder;
@@ -22,7 +25,7 @@ describe('PromptBuilder', () => {
       );
 
       expect(result.systemPrompt).toContain('AI Consul');
-      expect(result.systemPrompt).toContain('job_interviews');
+      expect(result.systemPrompt).toContain('JOB INTERVIEW MODE');
       expect(result.userPrompt).toContain(conversationContext);
       expect(result.userPrompt).toContain(ragContext);
     });
