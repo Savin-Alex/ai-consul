@@ -29,6 +29,19 @@ pnpm run build:mac
 pnpm run build:win
 ```
 
+## Testing
+
+```bash
+# Run tests
+pnpm test
+
+# Run tests with UI
+pnpm run test:ui
+
+# Run tests with coverage
+pnpm run test:coverage
+```
+
 ## Requirements
 
 - Node.js 18+
@@ -37,5 +50,32 @@ pnpm run build:win
 
 ## Environment Variables
 
-Copy `.env.example` to `.env` and fill in your API keys for cloud fallback services.
+Copy `.env.example` to `.env` and fill in your API keys for cloud fallback services:
 
+```bash
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+GOOGLE_API_KEY=...
+SENTRY_DSN=https://...
+UPDATE_ENDPOINT=https://updates.yourapp.com
+```
+
+## Project Structure
+
+```
+src/
+├── main/          # Electron main process
+├── renderer/      # React UI components
+├── core/          # AI engine core
+│   ├── audio/     # Audio capture and transcription
+│   ├── llm/       # LLM integrations (local and cloud)
+│   ├── context/   # Conversation context and RAG
+│   ├── prompts/   # Prompt building and validation
+│   ├── modes/     # Special modes (simulation, coaching)
+│   └── security/  # Privacy and security
+└── utils/         # Shared utilities
+```
+
+## License
+
+MIT
