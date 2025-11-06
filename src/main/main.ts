@@ -92,9 +92,73 @@ ipcMain.handle('platform', () => {
 });
 
 // Check if session manager is ready
+// If not ready, try to create it immediately (fallback for race conditions)
 ipcMain.handle('session-manager-ready', () => {
+  console.log('=== IPC handler called ===');
+  console.log('sessionManager:', sessionManager);
+  console.log('engine:', engine);
+  console.log('mainWindow:', mainWindow !== null);
+  console.log('companionWindow:', companionWindow !== null);
+  
+  if (sessionManager === null) {
+    console.log('Session manager is null, attempting to create...');
+    
+    // Try to create engine if it doesn't exist
+    if (engine === null) {
+      console.log('Engine is also null, creating engine first...');
+      try {
+        engine = new AIConsulEngine({
+          privacy: {
+            offlineFirst: true,
+            cloudFallback: false,
+            dataRetention: 7,
+          },
+          performance: {
+            hardwareTier: 'auto-detect',
+            latencyTarget: 5000,
+            qualityPreference: 'balanced',
+          },
+          models: {
+            transcription: {
+              primary: 'local-whisper-tiny',
+              fallback: 'cloud-whisper',
+            },
+            llm: {
+              primary: 'ollama://llama3:8b',
+              fallbacks: ['gpt-4o-mini', 'claude-3-haiku'],
+            },
+          },
+        });
+        console.log('Engine created in IPC handler');
+      } catch (error) {
+        console.error('Error creating engine in IPC handler:', error);
+      }
+    }
+    
+    // Now create session manager if engine exists
+    if (engine !== null) {
+      console.log('Creating session manager with existing engine...');
+      try {
+        sessionManager = new SessionManager(engine);
+        console.log('Session manager created successfully in IPC handler');
+        
+        if (mainWindow && companionWindow) {
+          sessionManager.setWindows(mainWindow, companionWindow);
+          console.log('Session manager windows set in IPC handler');
+        } else {
+          console.warn('Windows not available in IPC handler');
+        }
+      } catch (error) {
+        console.error('Error creating session manager in IPC handler:', error);
+        console.error('Error stack:', error instanceof Error ? error.stack : 'No stack');
+      }
+    } else {
+      console.error('Cannot create session manager: engine is null');
+    }
+  }
+  
   const ready = sessionManager !== null;
-  console.log(`session-manager-ready check: ${ready}`);
+  console.log(`=== IPC handler returning: ready=${ready} ===`);
   return { ready };
 });
 
@@ -168,13 +232,23 @@ ipcMain.on('audio-chunk', async (_event, chunkData: { data: number[]; sampleRate
   await sessionManager.processAudioChunk(chunk);
 });
 
+// Initialize immediately when app is ready
 app.whenReady().then(async () => {
+  console.log('=== app.whenReady() fired ===');
   setupErrorHandling();
   setupSecurity();
+  
+  // Create windows FIRST - they must exist before session manager
+  console.log('Creating windows...');
   createMainWindow();
   createCompanionWindow();
+  console.log('Windows created');
+  
+  // Wait a moment for windows to be fully created
+  await new Promise(resolve => setTimeout(resolve, 100));
+  console.log('Windows ready, proceeding with initialization');
 
-  // Initialize AI engine
+  // Initialize AI engine object (not initialized yet, just created)
   engine = new AIConsulEngine({
     privacy: {
       offlineFirst: true,
@@ -198,31 +272,66 @@ app.whenReady().then(async () => {
     },
   });
 
-  // Create session manager immediately (don't wait for engine initialization)
-  console.log('Creating session manager immediately...');
-  sessionManager = new SessionManager(engine);
-  console.log('Session manager created, ready:', sessionManager !== null);
-  
-  if (mainWindow && companionWindow) {
-    sessionManager.setWindows(mainWindow, companionWindow);
-    console.log('Session manager windows set');
-  }
-  
-  // Notify renderer that session manager is ready immediately
-  const notifyReady = () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      console.log('Sending session-manager-ready event to renderer');
-      mainWindow.webContents.send('session-manager-ready', { ready: true });
+  // Create session manager IMMEDIATELY after engine object is created
+  // This happens synchronously, before renderer starts polling
+  try {
+    console.log('=== Creating session manager ===');
+    console.log('Engine object exists:', engine !== null);
+    console.log('Main window exists:', mainWindow !== null);
+    console.log('Companion window exists:', companionWindow !== null);
+    
+    sessionManager = new SessionManager(engine);
+    console.log('Session manager created successfully');
+    console.log('Session manager is not null:', sessionManager !== null);
+    
+    // Set windows if they exist
+    if (mainWindow && companionWindow) {
+      sessionManager.setWindows(mainWindow, companionWindow);
+      console.log('Session manager windows set');
     } else {
-      console.error('Main window is destroyed, cannot send ready event');
+      console.warn('Windows not ready, session manager created without window context');
     }
-  };
-  
-  // Send immediately and multiple times
-  setTimeout(notifyReady, 100);
-  setTimeout(notifyReady, 500);
-  setTimeout(notifyReady, 1000);
-  setTimeout(notifyReady, 2000);
+    
+    // Verify the handler will return true
+    const handlerCheck = sessionManager !== null;
+    console.log('IPC handler will return ready:', handlerCheck);
+    
+    // Notify renderer that session manager is ready
+    // Use 'did-finish-load' event to ensure renderer is ready to receive
+    const notifyReady = () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        console.log('Sending session-manager-ready event to renderer');
+        mainWindow.webContents.send('session-manager-ready', { ready: true });
+      } else {
+        console.error('Main window is destroyed, cannot send ready event');
+      }
+    };
+    
+    // Wait for renderer to finish loading, then notify
+    if (mainWindow) {
+      mainWindow.webContents.once('did-finish-load', () => {
+        console.log('Renderer finished loading, sending ready event');
+        notifyReady();
+        // Also send after a short delay to be safe
+        setTimeout(notifyReady, 100);
+        setTimeout(notifyReady, 500);
+      });
+      
+      // If already loaded, send immediately
+      if (mainWindow.webContents.isLoading() === false) {
+        setTimeout(notifyReady, 100);
+      }
+    }
+    
+    console.log('=== Session manager initialization complete ===');
+  } catch (error) {
+    console.error('=== ERROR creating session manager ===');
+    console.error('Error:', error);
+    console.error('Stack:', error instanceof Error ? error.stack : 'No stack');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('error', `Session manager creation failed: ${error}`);
+    }
+  }
 
   // Initialize engine in background (non-blocking)
   (async () => {

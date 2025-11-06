@@ -53,32 +53,34 @@ const MainWindow: React.FC = () => {
         }
       });
 
-      // Check if already ready (poll every 500ms for up to 10 seconds)
+      // Check if already ready (poll every 500ms, but extend timeout to 30 seconds)
+      // This gives more time for app.whenReady() to complete
       let attempts = 0;
-      const maxAttempts = 20;
+      const maxAttempts = 60; // 30 seconds instead of 10
       let checkReadyInterval: NodeJS.Timeout | null = null;
       
       const checkReady = () => {
         attempts++;
-        console.log(`Checking session manager ready (attempt ${attempts}/${maxAttempts})...`);
+        if (attempts % 10 === 0) { // Log every 5 seconds instead of every attempt
+          console.log(`Checking session manager ready (attempt ${attempts}/${maxAttempts})...`);
+        }
         window.electronAPI.invoke('session-manager-ready').then((result: any) => {
-          console.log('session-manager-ready result:', result);
           if (result?.ready) {
-            console.log('Session manager is ready!');
+            console.log('Session manager is ready! (via polling)');
             setIsReady(true);
             if (checkReadyInterval) {
               clearInterval(checkReadyInterval);
               checkReadyInterval = null;
             }
-          } else {
-            console.log('Session manager not ready yet');
+          } else if (attempts % 10 === 0) {
+            console.log('Session manager not ready yet, continuing to poll...');
           }
         }).catch((err) => {
           console.error('Error checking session manager ready:', err);
         });
         
         if (attempts >= maxAttempts) {
-          console.log('Max attempts reached, stopping polling');
+          console.warn('Max polling attempts reached. Session manager may not be initialized.');
           if (checkReadyInterval) {
             clearInterval(checkReadyInterval);
             checkReadyInterval = null;
@@ -86,6 +88,7 @@ const MainWindow: React.FC = () => {
         }
       };
       
+      // Start polling after a short delay to let main process initialize
       checkReadyInterval = setInterval(checkReady, 500);
 
       window.electronAPI.on('start-audio-capture', async (config: any) => {
