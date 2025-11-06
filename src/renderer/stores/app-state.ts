@@ -14,6 +14,9 @@ interface AppState {
     performanceTier: 'basic' | 'standard' | 'pro' | 'auto-detected';
   }) => void;
   setOllamaStatus: (connected: boolean, model?: string) => void;
+  setAudioSource: (source: 'mic-only' | 'full-system-audio') => void;
+  setPrivacyMode: (mode: 'local-first' | 'cloud-enabled') => void;
+  setPerformanceTier: (tier: 'basic' | 'standard' | 'pro' | 'auto-detected') => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -57,6 +60,51 @@ export const useAppStore = create<AppState>((set) => ({
 
   setOllamaStatus: (connected, model) => {
     set({ ollamaConnected: connected, ollamaModel: model || 'llama3:8b' });
+  },
+
+  setAudioSource: (source) => {
+    set({ audioSource: source });
+    // Save to localStorage
+    const saved = localStorage.getItem('ai-consul-config');
+    if (saved) {
+      try {
+        const config = JSON.parse(saved);
+        config.audioSource = source;
+        localStorage.setItem('ai-consul-config', JSON.stringify(config));
+      } catch (e) {
+        console.error('Failed to save audio source:', e);
+      }
+    }
+  },
+
+  setPrivacyMode: (mode) => {
+    set({ privacyMode: mode });
+    // Save to localStorage
+    const saved = localStorage.getItem('ai-consul-config');
+    if (saved) {
+      try {
+        const config = JSON.parse(saved);
+        config.privacyMode = mode;
+        localStorage.setItem('ai-consul-config', JSON.stringify(config));
+      } catch (e) {
+        console.error('Failed to save privacy mode:', e);
+      }
+    }
+  },
+
+  setPerformanceTier: (tier) => {
+    set({ performanceTier: tier });
+    // Save to localStorage
+    const saved = localStorage.getItem('ai-consul-config');
+    if (saved) {
+      try {
+        const config = JSON.parse(saved);
+        config.performanceTier = tier;
+        localStorage.setItem('ai-consul-config', JSON.stringify(config));
+      } catch (e) {
+        console.error('Failed to save performance tier:', e);
+      }
+    }
   },
 }));
 

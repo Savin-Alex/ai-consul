@@ -1,6 +1,10 @@
 import { z } from 'zod';
-// @ts-ignore - JSON import
-import promptLibrary from '../../../../ai_prompt_library_final_v2.1.json';
+// Load JSON at runtime using fs to avoid import path issues
+import * as fs from 'fs';
+import * as path from 'path';
+
+const promptLibraryPath = path.join(__dirname, '../../../ai_prompt_library_final_v2.1.json');
+const promptLibrary = JSON.parse(fs.readFileSync(promptLibraryPath, 'utf-8'));
 
 type PromptMode = 'education' | 'work_meetings' | 'job_interviews' | 'chat_messaging' | 'simulation_coaching';
 

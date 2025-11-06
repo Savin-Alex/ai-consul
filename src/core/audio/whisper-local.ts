@@ -1,8 +1,21 @@
-import { pipeline, env } from '@xenova/transformers';
+// Dynamic import for ES module support
+let pipeline: any;
+let env: any;
 
-// Disable local model files to use CDN
-env.allowLocalModels = false;
-env.allowRemoteModels = true;
+async function loadTransformers() {
+  if (!pipeline || !env) {
+    // Use Function constructor to force true dynamic import (not transformed by TypeScript)
+    const importTransformers = new Function('specifier', 'return import(specifier)');
+    const transformers = await importTransformers('@xenova/transformers');
+    pipeline = transformers.pipeline;
+    env = transformers.env;
+    
+    // Disable local model files to use CDN
+    env.allowLocalModels = false;
+    env.allowRemoteModels = true;
+  }
+  return { pipeline, env };
+}
 
 export class LocalWhisper {
   private model: any = null;
@@ -21,8 +34,11 @@ export class LocalWhisper {
     try {
       console.log(`Loading Whisper model: ${modelName}`);
       
+      // Load transformers dynamically
+      const { pipeline: pipelineFn } = await loadTransformers();
+      
       // Load the model and processor
-      this.processor = await pipeline(
+      this.processor = await pipelineFn(
         'automatic-speech-recognition',
         modelName,
         {

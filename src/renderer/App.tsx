@@ -3,6 +3,7 @@ import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import Onboarding from './components/Onboarding/Onboarding';
 import Settings from './components/Settings/Settings';
 import CompanionWindow from './components/CompanionWindow/CompanionWindow';
+import MainWindow from './components/MainWindow/MainWindow';
 import { useAppStore } from './stores/app-state';
 
 declare global {
@@ -30,8 +31,8 @@ function MainApp() {
 
   return (
     <div className="app">
+      <MainWindow />
       <Settings />
-      <CompanionWindow />
     </div>
   );
 }

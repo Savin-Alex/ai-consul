@@ -1,5 +1,9 @@
-// @ts-ignore - JSON import
-import promptLibrary from '../../../../ai_prompt_library_final_v2.1.json';
+// Load JSON at runtime using fs to avoid import path issues
+import * as fs from 'fs';
+import * as path from 'path';
+
+const promptLibraryPath = path.join(__dirname, '../../../ai_prompt_library_final_v2.1.json');
+const promptLibrary = JSON.parse(fs.readFileSync(promptLibraryPath, 'utf-8'));
 
 type PromptMode = 'education' | 'work_meetings' | 'job_interviews' | 'chat_messaging' | 'simulation_coaching';
 
@@ -71,7 +75,8 @@ export class PromptBuilder {
     }
     // Fallback to coaching_nudge schema for simulation mode
     if (mode === 'simulation_coaching') {
-      return modeConfig?.output_schemas?.coaching_nudge;
+      const simMode = modeConfig as any;
+      return simMode?.output_schemas?.coaching_nudge;
     }
     return null;
   }

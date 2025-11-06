@@ -22,7 +22,7 @@ function createMainWindow(): void {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, 'preload.cjs'),
+      preload: path.join(__dirname, 'preload.js'),
       sandbox: false,
     },
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
@@ -48,10 +48,12 @@ function createCompanionWindow(): void {
     alwaysOnTop: true,
     transparent: true,
     skipTaskbar: true,
+    movable: true,
+    resizable: true,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, 'preload.cjs'),
+      preload: path.join(__dirname, 'preload.js'),
       sandbox: false,
     },
   });
@@ -89,29 +91,81 @@ ipcMain.handle('platform', () => {
   return process.platform;
 });
 
-// Session management IPC handlers
+// Check if session manager is ready
+ipcMain.handle('session-manager-ready', () => {
+  const ready = sessionManager !== null;
+  console.log(`session-manager-ready check: ${ready}`);
+  return { ready };
+});
+
+// Session management IPC handlers - registered at module load, sessionManager checked at runtime
 ipcMain.handle('start-session', async (_event, config) => {
   if (!sessionManager) {
-    throw new Error('Session manager not initialized');
+    throw new Error('Session manager not initialized. Please wait for the app to finish loading.');
   }
-  await sessionManager.start(config);
-  return { success: true };
+  try {
+    await sessionManager.start(config);
+    // Send status update to renderer
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('session-status', { isActive: true, mode: config.mode });
+    }
+    return { success: true };
+  } catch (error: any) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('error', error.message || 'Failed to start session');
+    }
+    throw error;
+  }
 });
 
 ipcMain.handle('stop-session', async () => {
   if (!sessionManager) {
+    return { success: false, error: 'Session manager not initialized' };
+  }
+  try {
+    await sessionManager.stop();
+    // Send status update to renderer
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('session-status', { isActive: false });
+    }
+    return { success: true };
+  } catch (error: any) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('error', error.message || 'Failed to stop session');
+    }
     return { success: false };
   }
-  await sessionManager.stop();
-  return { success: true };
 });
 
 ipcMain.handle('pause-session', async () => {
   if (!sessionManager) {
+    return { success: false, error: 'Session manager not initialized' };
+  }
+  try {
+    await sessionManager.pause();
+    return { success: true };
+  } catch (error: any) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('error', error.message || 'Failed to pause session');
+    }
     return { success: false };
   }
-  await sessionManager.pause();
-  return { success: true };
+});
+
+// Handle audio chunks from renderer
+ipcMain.on('audio-chunk', async (_event, chunkData: { data: number[]; sampleRate: number; channels: number; timestamp: number }) => {
+  if (!sessionManager) return;
+  
+  // Convert array back to Float32Array
+  const float32Array = new Float32Array(chunkData.data);
+  const chunk = {
+    data: float32Array,
+    sampleRate: chunkData.sampleRate,
+    channels: chunkData.channels,
+    timestamp: chunkData.timestamp,
+  };
+  
+  await sessionManager.processAudioChunk(chunk);
 });
 
 app.whenReady().then(async () => {
@@ -144,13 +198,49 @@ app.whenReady().then(async () => {
     },
   });
 
-  await engine.initialize();
-
-  // Initialize session manager
+  // Create session manager immediately (don't wait for engine initialization)
+  console.log('Creating session manager immediately...');
   sessionManager = new SessionManager(engine);
+  console.log('Session manager created, ready:', sessionManager !== null);
+  
   if (mainWindow && companionWindow) {
     sessionManager.setWindows(mainWindow, companionWindow);
+    console.log('Session manager windows set');
   }
+  
+  // Notify renderer that session manager is ready immediately
+  const notifyReady = () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      console.log('Sending session-manager-ready event to renderer');
+      mainWindow.webContents.send('session-manager-ready', { ready: true });
+    } else {
+      console.error('Main window is destroyed, cannot send ready event');
+    }
+  };
+  
+  // Send immediately and multiple times
+  setTimeout(notifyReady, 100);
+  setTimeout(notifyReady, 500);
+  setTimeout(notifyReady, 1000);
+  setTimeout(notifyReady, 2000);
+
+  // Initialize engine in background (non-blocking)
+  (async () => {
+    try {
+      console.log('=== Starting engine initialization (background) ===');
+      console.log('Initializing AI engine...');
+      await engine.initialize();
+      console.log('AI engine initialized successfully');
+      console.log('=== Engine initialization complete ===');
+    } catch (error) {
+      console.error('=== Error during engine initialization ===');
+      console.error('Error:', error);
+      console.error('Stack:', error instanceof Error ? error.stack : 'No stack');
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('error', `Engine initialization failed: ${error}`);
+      }
+    }
+  })();
 
   if (!isDev) {
     setupAutoUpdater();

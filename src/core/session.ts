@@ -1,11 +1,16 @@
 import { EventEmitter } from 'events';
 import { AIConsulEngine, SessionConfig, Suggestion } from './engine';
-import { AudioCaptureManager, AudioChunk } from './audio/capture';
-import { ipcMain, BrowserWindow } from 'electron';
+import { BrowserWindow } from 'electron';
+
+export interface AudioChunk {
+  data: Float32Array;
+  sampleRate: number;
+  channels: number;
+  timestamp: number;
+}
 
 export class SessionManager extends EventEmitter {
   private engine: AIConsulEngine;
-  private audioManager: AudioCaptureManager;
   private isActive = false;
   private currentConfig: SessionConfig | null = null;
   private mainWindow: BrowserWindow | null = null;
@@ -14,8 +19,6 @@ export class SessionManager extends EventEmitter {
   constructor(engine: AIConsulEngine) {
     super();
     this.engine = engine;
-    this.audioManager = new AudioCaptureManager();
-    this.setupAudioHandlers();
   }
 
   setWindows(mainWindow: BrowserWindow, companionWindow: BrowserWindow): void {
@@ -23,28 +26,26 @@ export class SessionManager extends EventEmitter {
     this.companionWindow = companionWindow;
   }
 
-  private setupAudioHandlers(): void {
-    this.audioManager.on('audio-chunk', async (chunk: AudioChunk) => {
-      if (!this.isActive) return;
+  async processAudioChunk(chunk: AudioChunk): Promise<void> {
+    if (!this.isActive) return;
 
-      try {
-        // Transcribe audio
-        const transcription = await this.engine.transcribe(chunk.data);
+    try {
+      // Transcribe audio
+      const transcription = await this.engine.transcribe(chunk.data);
 
-        if (!transcription || transcription.trim().length === 0) {
-          return;
-        }
-
-        // Generate suggestions
-        const suggestions = await this.engine.generateSuggestions(transcription);
-
-        // Send to UI
-        this.sendSuggestionsToUI(suggestions);
-      } catch (error) {
-        console.error('Session processing error:', error);
-        this.emit('error', error);
+      if (!transcription || transcription.trim().length === 0) {
+        return;
       }
-    });
+
+      // Generate suggestions
+      const suggestions = await this.engine.generateSuggestions(transcription);
+
+      // Send to UI
+      this.sendSuggestionsToUI(suggestions);
+    } catch (error) {
+      console.error('Session processing error:', error);
+      this.emit('error', error);
+    }
   }
 
   async start(config: SessionConfig): Promise<void> {
@@ -57,12 +58,14 @@ export class SessionManager extends EventEmitter {
     // Start engine session
     await this.engine.startSession(config);
 
-    // Start audio capture
-    await this.audioManager.startCapture({
-      sources: ['microphone'], // Can be extended to include system audio
-      sampleRate: 16000,
-      channels: 1,
-    });
+    // Signal renderer to start audio capture
+    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+      this.mainWindow.webContents.send('start-audio-capture', {
+        sources: ['microphone'],
+        sampleRate: 16000,
+        channels: 1,
+      });
+    }
 
     this.isActive = true;
     this.emit('session-started', config);
@@ -71,7 +74,11 @@ export class SessionManager extends EventEmitter {
   async pause(): Promise<void> {
     if (!this.isActive) return;
 
-    await this.audioManager.stopCapture();
+    // Signal renderer to stop audio capture
+    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+      this.mainWindow.webContents.send('stop-audio-capture');
+    }
+
     this.isActive = false;
     this.emit('session-paused');
   }
@@ -79,7 +86,11 @@ export class SessionManager extends EventEmitter {
   async stop(): Promise<void> {
     if (!this.isActive && !this.currentConfig) return;
 
-    await this.audioManager.stopCapture();
+    // Signal renderer to stop audio capture
+    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+      this.mainWindow.webContents.send('stop-audio-capture');
+    }
+
     this.engine.stopSession();
     this.currentConfig = null;
     this.isActive = false;

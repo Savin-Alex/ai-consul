@@ -24,7 +24,7 @@ export class SecureDataFlow {
     // based on privacyConfig.cloudFallback
   }
 
-  async cleanupSensitiveData(): void {
+  async cleanupSensitiveData(): Promise<void> {
     // Securely wipe memory (best effort)
     this.secureWipe(this.audioBuffers);
     this.secureWipe(this.transcriptCache);

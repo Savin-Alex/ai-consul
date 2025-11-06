@@ -6,8 +6,12 @@ import { RAGEngine } from './context/rag-engine';
 import { SecureDataFlow } from './security/privacy';
 import { PromptBuilder } from './prompts/builder';
 import { OutputValidator } from './prompts/validator';
-// @ts-ignore - JSON import
-import promptLibrary from '../../../../ai_prompt_library_final_v2.1.json';
+// Load JSON at runtime using fs to avoid import path issues
+import * as fs from 'fs';
+import * as path from 'path';
+
+const promptLibraryPath = path.join(__dirname, '../../ai_prompt_library_final_v2.1.json');
+const promptLibrary = JSON.parse(fs.readFileSync(promptLibraryPath, 'utf-8'));
 
 export interface EngineConfig {
   privacy: {
@@ -33,7 +37,7 @@ export interface EngineConfig {
 }
 
 export interface SessionConfig {
-  mode: 'interview' | 'meeting' | 'education' | 'chat' | 'simulation';
+  mode: 'job_interviews' | 'work_meetings' | 'education' | 'chat_messaging' | 'simulation_coaching';
   context?: {
     documents?: string[];
     skills?: string[];
@@ -88,23 +92,41 @@ export class AIConsulEngine {
 
   async initialize(): Promise<void> {
     if (this.isInitialized) {
+      console.log('Engine already initialized');
       return;
     }
 
-    // Initialize Whisper
-    if (
-      this.config.models.transcription.primary.startsWith('local-whisper')
-    ) {
-      const modelSize = this.config.models.transcription.primary.includes('base')
-        ? 'base'
-        : 'tiny';
-      await this.localWhisper.initialize(modelSize);
+    try {
+      console.log('Starting engine initialization...');
+      
+      // Initialize RAG engine (fast, synchronous)
+      console.log('Initializing RAG engine...');
+      await this.ragEngine.initialize();
+      console.log('RAG engine initialized');
+
+      // Initialize Whisper in background (can take time, especially first load)
+      // Don't block on this - it will initialize when needed
+      if (
+        this.config.models.transcription.primary.startsWith('local-whisper')
+      ) {
+        const modelSize = this.config.models.transcription.primary.includes('base')
+          ? 'base'
+          : 'tiny';
+        console.log(`Starting Whisper initialization in background (model size: ${modelSize})...`);
+        // Initialize in background, don't wait
+        this.localWhisper.initialize(modelSize).then(() => {
+          console.log('Whisper initialized in background');
+        }).catch((error) => {
+          console.error('Whisper initialization failed (will retry when needed):', error);
+        });
+      }
+
+      this.isInitialized = true;
+      console.log('Engine initialization complete (Whisper loading in background)');
+    } catch (error) {
+      console.error('Error during engine initialization:', error);
+      throw error;
     }
-
-    // Initialize RAG engine
-    await this.ragEngine.initialize();
-
-    this.isInitialized = true;
   }
 
   async transcribe(audioChunk: Float32Array): Promise<string> {
@@ -148,7 +170,7 @@ export class AIConsulEngine {
 
     // Build prompt with mode awareness
     const prompt = this.promptBuilder.buildPrompt(
-      this.currentSession.mode,
+      this.currentSession.mode as any, // Type assertion for mode compatibility
       this.contextManager.getContext(),
       this.ragEngine.getRelevantContext(transcription)
     );
@@ -162,7 +184,7 @@ export class AIConsulEngine {
     // Validate output
     const validated = this.outputValidator.validate(
       llmResponse,
-      this.currentSession.mode
+      this.currentSession.mode as any // Type assertion for mode compatibility
     );
 
     return validated.suggestions.map((text) => ({

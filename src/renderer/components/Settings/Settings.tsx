@@ -8,6 +8,9 @@ const Settings: React.FC = () => {
     privacyMode,
     performanceTier,
     setOllamaStatus,
+    setAudioSource,
+    setPrivacyMode,
+    setPerformanceTier,
   } = useAppStore();
   const [isOpen, setIsOpen] = useState(false);
 
@@ -25,7 +28,10 @@ const Settings: React.FC = () => {
           
           <div className="settings-section">
             <label>Privacy Mode</label>
-            <select value={privacyMode} disabled>
+            <select 
+              value={privacyMode} 
+              onChange={(e) => setPrivacyMode(e.target.value as 'local-first' | 'cloud-enabled')}
+            >
               <option value="local-first">Local First</option>
               <option value="cloud-enabled">Cloud Enabled</option>
             </select>
@@ -33,7 +39,10 @@ const Settings: React.FC = () => {
 
           <div className="settings-section">
             <label>Performance Tier</label>
-            <select value={performanceTier} disabled>
+            <select 
+              value={performanceTier} 
+              onChange={(e) => setPerformanceTier(e.target.value as 'basic' | 'standard' | 'pro' | 'auto-detected')}
+            >
               <option value="auto-detected">Auto-Detected</option>
               <option value="basic">Basic</option>
               <option value="standard">Standard</option>
@@ -43,7 +52,10 @@ const Settings: React.FC = () => {
 
           <div className="settings-section">
             <label>Audio Source</label>
-            <select value={audioSource} disabled>
+            <select 
+              value={audioSource} 
+              onChange={(e) => setAudioSource(e.target.value as 'mic-only' | 'full-system-audio')}
+            >
               <option value="mic-only">Microphone Only</option>
               <option value="full-system-audio">Full System Audio</option>
             </select>
