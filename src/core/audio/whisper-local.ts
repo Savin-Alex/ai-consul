@@ -22,36 +22,45 @@ export class LocalWhisper {
   private processor: any = null;
   private isInitialized = false;
   private modelSize: 'tiny' | 'base' = 'tiny';
+  private initializationPromise: Promise<void> | null = null;
 
   async initialize(modelSize: 'tiny' | 'base' = 'tiny'): Promise<void> {
     if (this.isInitialized && this.modelSize === modelSize) {
       return;
     }
 
+    if (this.initializationPromise && this.modelSize === modelSize) {
+      return this.initializationPromise;
+    }
+
     this.modelSize = modelSize;
     const modelName = `Xenova/whisper-${modelSize}`;
 
-    try {
-      console.log(`Loading Whisper model: ${modelName}`);
-      
-      // Load transformers dynamically
-      const { pipeline: pipelineFn } = await loadTransformers();
-      
-      // Load the model and processor
-      this.processor = await pipelineFn(
-        'automatic-speech-recognition',
-        modelName,
-        {
-          quantized: true, // Use quantized models for faster loading
-        }
-      );
+    this.initializationPromise = (async () => {
+      try {
+        console.log(`Loading Whisper model: ${modelName}`);
 
-      this.isInitialized = true;
-      console.log('Whisper model loaded successfully');
-    } catch (error) {
-      console.error('Failed to load Whisper model:', error);
-      throw new Error(`Failed to initialize Whisper: ${error}`);
-    }
+        const { pipeline: pipelineFn } = await loadTransformers();
+
+        this.processor = await pipelineFn(
+          'automatic-speech-recognition',
+          modelName,
+          {
+            quantized: true,
+          }
+        );
+
+        this.isInitialized = true;
+        console.log('Whisper model loaded successfully');
+      } catch (error) {
+        console.error('Failed to load Whisper model:', error);
+        throw new Error(`Failed to initialize Whisper: ${error}`);
+      } finally {
+        this.initializationPromise = null;
+      }
+    })();
+
+    return this.initializationPromise;
   }
 
   async transcribe(audioChunk: Float32Array, sampleRate: number = 16000): Promise<string> {
@@ -75,7 +84,11 @@ export class LocalWhisper {
       return result.text || '';
     } catch (error) {
       console.error('Whisper transcription error:', error);
-      throw new Error(`Transcription failed: ${error}`);
+      if (error instanceof Error) {
+        console.error('Whisper transcription stack:', error.stack);
+        throw new Error(`Transcription failed: ${error.message}`);
+      }
+      throw new Error(`Transcription failed: ${String(error)}`);
     }
   }
 

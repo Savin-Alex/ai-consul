@@ -16,6 +16,8 @@ describe('AIConsulEngine', () => {
   let config: EngineConfig;
 
   beforeEach(() => {
+    vi.clearAllMocks();
+
     config = {
       privacy: {
         offlineFirst: true,
@@ -66,34 +68,69 @@ describe('AIConsulEngine', () => {
   });
 
   describe('transcribe', () => {
-    it('should transcribe audio using local whisper', async () => {
-      const localWhisper = vi.mocked(LocalWhisper);
+    it('should return transcript when local whisper succeeds', async () => {
       const transcribeSpy = vi
         .fn()
         .mockResolvedValue('Hello, this is a test transcription');
-      localWhisper.prototype.transcribe = transcribeSpy;
-      localWhisper.prototype.initialize = vi.fn().mockResolvedValue(undefined);
+      (engine as any).localWhisper = {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        transcribe: transcribeSpy,
+      };
 
       await engine.initialize();
       const audioChunk = new Float32Array([0.1, 0.2, 0.3]);
       const result = await engine.transcribe(audioChunk);
 
       expect(result).toBe('Hello, this is a test transcription');
-      expect(transcribeSpy).toHaveBeenCalledWith(audioChunk);
+      expect(transcribeSpy).toHaveBeenCalledWith(audioChunk, 16000);
     });
 
-    it('should throw error when transcription fails', async () => {
-      const localWhisper = vi.mocked(LocalWhisper);
-      localWhisper.prototype.transcribe = vi
-        .fn()
-        .mockRejectedValue(new Error('Transcription failed'));
-      localWhisper.prototype.initialize = vi.fn().mockResolvedValue(undefined);
+    it('should return empty string when local whisper returns no transcript', async () => {
+      const transcribeSpy = vi.fn().mockResolvedValue('');
+      (engine as any).localWhisper = {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        transcribe: transcribeSpy,
+      };
+
+      await engine.initialize();
+      const audioChunk = new Float32Array([0.1, 0.2, 0.3]);
+      const result = await engine.transcribe(audioChunk);
+
+      expect(result).toBe('');
+      expect(transcribeSpy).toHaveBeenCalledWith(audioChunk, 16000);
+    });
+
+    it('should throw error when primary and fallback transcription fail', async () => {
+      const failingLocalWhisper = {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        transcribe: vi
+          .fn()
+          .mockRejectedValue(new Error('Transcription failed')),
+      };
+
+      const failingCloudWhisper = {
+        transcribe: vi
+          .fn()
+          .mockRejectedValue(new Error('Cloud transcription failed')),
+      };
+
+      const fallbackConfig: EngineConfig = {
+        ...config,
+        privacy: {
+          ...config.privacy,
+          cloudFallback: true,
+        },
+      };
+
+      engine = new AIConsulEngine(fallbackConfig);
+      (engine as any).localWhisper = failingLocalWhisper;
+      (engine as any).cloudWhisper = failingCloudWhisper;
 
       await engine.initialize();
       const audioChunk = new Float32Array([0.1, 0.2, 0.3]);
 
       await expect(engine.transcribe(audioChunk)).rejects.toThrow(
-        'Transcription failed'
+        'Cloud transcription failed'
       );
     });
   });

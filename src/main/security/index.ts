@@ -7,7 +7,7 @@ export function setupSecurity(): void {
       responseHeaders: {
         ...details.responseHeaders,
         'Content-Security-Policy': [
-          "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://api.openai.com https://api.anthropic.com https://generativelanguage.googleapis.com http://localhost:11434;",
+          "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; media-src 'self' blob: data:; connect-src 'self' blob: https://api.openai.com https://api.anthropic.com https://generativelanguage.googleapis.com http://localhost:11434;",
         ],
       },
     });
@@ -31,9 +31,11 @@ export function setupSecurity(): void {
   });
 
   // Disable remote module
-  if (process.type === 'renderer') {
-    // @ts-ignore - remote is deprecated but we want to ensure it's disabled
-    delete global.require?.cache?.remote;
+  if ((process as NodeJS.Process & { type?: string }).type === 'renderer') {
+    const { require: nodeRequire } = global as typeof global & { require?: NodeRequire };
+    if (nodeRequire?.cache && 'remote' in nodeRequire.cache) {
+      delete nodeRequire.cache.remote;
+    }
   }
 }
 

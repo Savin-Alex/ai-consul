@@ -1,23 +1,57 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import './MainWindow.css';
 import { AudioCaptureManager, AudioChunk } from '../../utils/audio-capture';
+import { useAppStore } from '../../stores/app-state';
 
 interface SessionStatus {
   isActive: boolean;
   mode?: string;
 }
 
+interface SessionManagerReadyPayload {
+  ready?: boolean;
+}
+
+interface StartStopResponse {
+  success?: boolean;
+  error?: string;
+}
+
+interface AudioCaptureConfig {
+  sources?: ('microphone' | 'system-audio')[];
+  sampleRate?: number;
+  channels?: number;
+  deviceId?: string;
+}
+
+const getErrorMessage = (error: unknown): string => {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === 'string') {
+    return error;
+  }
+  return 'Unknown error occurred';
+};
+
 const MainWindow: React.FC = () => {
   const [sessionStatus, setSessionStatus] = useState<SessionStatus>({ isActive: false });
   const [selectedMode, setSelectedMode] = useState<string>('job_interviews');
   const [error, setError] = useState<string | null>(null);
-  const [audioManager, setAudioManager] = useState<AudioCaptureManager | null>(null);
   const [isReady, setIsReady] = useState<boolean>(false);
+  const { selectedMicrophoneId, setMicrophones } = useAppStore((state) => ({
+    selectedMicrophoneId: state.selectedMicrophoneId,
+    setMicrophones: state.setMicrophones,
+  }));
+  const selectedMicrophoneRef = useRef<string>(selectedMicrophoneId);
+
+  useEffect(() => {
+    selectedMicrophoneRef.current = selectedMicrophoneId;
+  }, [selectedMicrophoneId]);
 
   useEffect(() => {
     // Initialize audio manager
     const manager = new AudioCaptureManager();
-    setAudioManager(manager);
 
     // Set up audio chunk handler
     manager.on('audio-chunk', (chunk: AudioChunk) => {
@@ -35,6 +69,9 @@ const MainWindow: React.FC = () => {
     });
 
     // Listen for session status updates
+    let checkReadyInterval: NodeJS.Timeout | null = null;
+    const deviceChangeHandlers: Array<() => void> = [];
+
     if (window.electronAPI) {
       window.electronAPI.on('session-status', (status: SessionStatus) => {
         setSessionStatus(status);
@@ -45,7 +82,7 @@ const MainWindow: React.FC = () => {
         setTimeout(() => setError(null), 5000);
       });
 
-      window.electronAPI.on('session-manager-ready', (data: any) => {
+      window.electronAPI.on('session-manager-ready', (data: SessionManagerReadyPayload) => {
         console.log('Received session-manager-ready event:', data);
         if (data?.ready) {
           console.log('Setting ready state to true');
@@ -53,32 +90,32 @@ const MainWindow: React.FC = () => {
         }
       });
 
-      // Check if already ready (poll every 500ms, but extend timeout to 30 seconds)
-      // This gives more time for app.whenReady() to complete
       let attempts = 0;
-      const maxAttempts = 60; // 30 seconds instead of 10
-      let checkReadyInterval: NodeJS.Timeout | null = null;
-      
+      const maxAttempts = 60;
+
       const checkReady = () => {
         attempts++;
-        if (attempts % 10 === 0) { // Log every 5 seconds instead of every attempt
+        if (attempts % 10 === 0) {
           console.log(`Checking session manager ready (attempt ${attempts}/${maxAttempts})...`);
         }
-        window.electronAPI.invoke('session-manager-ready').then((result: any) => {
-          if (result?.ready) {
-            console.log('Session manager is ready! (via polling)');
-            setIsReady(true);
-            if (checkReadyInterval) {
-              clearInterval(checkReadyInterval);
-              checkReadyInterval = null;
+        window.electronAPI
+          .invoke('session-manager-ready')
+          .then((result: SessionManagerReadyPayload | undefined) => {
+            if (result?.ready) {
+              console.log('Session manager is ready! (via polling)');
+              setIsReady(true);
+              if (checkReadyInterval) {
+                clearInterval(checkReadyInterval);
+                checkReadyInterval = null;
+              }
+            } else if (attempts % 10 === 0) {
+              console.log('Session manager not ready yet, continuing to poll...');
             }
-          } else if (attempts % 10 === 0) {
-            console.log('Session manager not ready yet, continuing to poll...');
-          }
-        }).catch((err) => {
-          console.error('Error checking session manager ready:', err);
-        });
-        
+          })
+          .catch((err: unknown) => {
+            console.error('Error checking session manager ready:', err);
+          });
+
         if (attempts >= maxAttempts) {
           console.warn('Max polling attempts reached. Session manager may not be initialized.');
           if (checkReadyInterval) {
@@ -87,33 +124,69 @@ const MainWindow: React.FC = () => {
           }
         }
       };
-      
-      // Start polling after a short delay to let main process initialize
+
       checkReadyInterval = setInterval(checkReady, 500);
 
-      window.electronAPI.on('start-audio-capture', async (config: any) => {
+      window.electronAPI.on('start-audio-capture', async (config: AudioCaptureConfig) => {
         try {
-          await manager.startCapture(config);
-        } catch (err: any) {
-          setError(err.message || 'Failed to start audio capture');
+          const captureConfig = {
+            ...config,
+            deviceId: selectedMicrophoneRef.current,
+          };
+          await manager.startCapture(captureConfig);
+        } catch (err: unknown) {
+          setError(getErrorMessage(err) || 'Failed to start audio capture');
         }
       });
 
       window.electronAPI.on('stop-audio-capture', async () => {
         try {
           await manager.stopCapture();
-        } catch (err: any) {
+        } catch (err: unknown) {
           console.error('Failed to stop audio capture:', err);
         }
       });
+
+      (async () => {
+        const devices = await manager.listInputDevices();
+        setMicrophones(devices);
+      })();
+
+      const handleDeviceChange = async () => {
+        const devices = await manager.listInputDevices();
+        setMicrophones(devices);
+      };
+
+      if (navigator.mediaDevices?.addEventListener) {
+        navigator.mediaDevices.addEventListener('devicechange', handleDeviceChange);
+        deviceChangeHandlers.push(() => {
+          navigator.mediaDevices.removeEventListener('devicechange', handleDeviceChange);
+        });
+      } else {
+        const mediaDevices = navigator.mediaDevices as MediaDevices & {
+          ondevicechange?: ((this: MediaDevices, ev: Event) => void) | null;
+        };
+
+        if (mediaDevices.ondevicechange !== undefined) {
+          const previousHandler = mediaDevices.ondevicechange;
+          mediaDevices.ondevicechange = handleDeviceChange;
+          deviceChangeHandlers.push(() => {
+            if (mediaDevices.ondevicechange === handleDeviceChange) {
+              mediaDevices.ondevicechange = previousHandler ?? null;
+            }
+          });
+        }
+      }
     }
 
     return () => {
       manager.stopCapture().catch(console.error);
-      // Cleanup interval if component unmounts
-      // Note: checkReadyInterval is in closure, will be cleaned up
+      if (checkReadyInterval) {
+        clearInterval(checkReadyInterval);
+      }
+      deviceChangeHandlers.forEach((cleanup) => cleanup());
     };
-  }, []);
+  }, [setMicrophones]);
 
   const handleStartSession = async () => {
     if (!window.electronAPI) {
@@ -135,12 +208,12 @@ const MainWindow: React.FC = () => {
         },
       };
 
-      const result = await window.electronAPI.invoke('start-session', config);
+      const result = await window.electronAPI.invoke('start-session', config) as StartStopResponse;
       if (result?.success) {
         setSessionStatus({ isActive: true, mode: selectedMode });
       }
-    } catch (err: any) {
-      setError(err.message || 'Failed to start session');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err) || 'Failed to start session');
     }
   };
 
@@ -150,12 +223,12 @@ const MainWindow: React.FC = () => {
     }
 
     try {
-      const result = await window.electronAPI.invoke('stop-session');
+      const result = await window.electronAPI.invoke('stop-session') as StartStopResponse;
       if (result?.success) {
         setSessionStatus({ isActive: false });
       }
-    } catch (err: any) {
-      setError(err.message || 'Failed to stop session');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err) || 'Failed to stop session');
     }
   };
 
@@ -166,8 +239,8 @@ const MainWindow: React.FC = () => {
 
     try {
       await window.electronAPI.invoke('pause-session');
-    } catch (err: any) {
-      setError(err.message || 'Failed to pause session');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err) || 'Failed to pause session');
     }
   };
 

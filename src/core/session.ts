@@ -15,6 +15,10 @@ export class SessionManager extends EventEmitter {
   private currentConfig: SessionConfig | null = null;
   private mainWindow: BrowserWindow | null = null;
   private companionWindow: BrowserWindow | null = null;
+  private audioBuffers: Float32Array[] = [];
+  private bufferedSamples = 0;
+  private isProcessingChunk = false;
+  private currentSampleRate = 16000;
 
   constructor(engine: AIConsulEngine) {
     super();
@@ -30,10 +34,36 @@ export class SessionManager extends EventEmitter {
     if (!this.isActive) return;
 
     try {
+      this.audioBuffers.push(chunk.data);
+      this.bufferedSamples += chunk.data.length;
+      this.currentSampleRate = chunk.sampleRate || this.currentSampleRate;
+
+      const minSamples = Math.round(this.currentSampleRate * 1.5); // ~1.5 seconds
+
+      if (this.isProcessingChunk || this.bufferedSamples < minSamples) {
+        return;
+      }
+
+      const combinedBuffer = new Float32Array(this.bufferedSamples);
+      let offset = 0;
+      for (const buffer of this.audioBuffers) {
+        combinedBuffer.set(buffer, offset);
+        offset += buffer.length;
+      }
+
+      // Reset buffers before processing to allow new data to accumulate
+      this.audioBuffers = [];
+      this.bufferedSamples = 0;
+      this.isProcessingChunk = true;
+
       // Transcribe audio
-      const transcription = await this.engine.transcribe(chunk.data);
+      const transcription = await this.engine.transcribe(
+        combinedBuffer,
+        this.currentSampleRate
+      );
 
       if (!transcription || transcription.trim().length === 0) {
+        this.isProcessingChunk = false;
         return;
       }
 
@@ -45,6 +75,8 @@ export class SessionManager extends EventEmitter {
     } catch (error) {
       console.error('Session processing error:', error);
       this.emit('error', error);
+    } finally {
+      this.isProcessingChunk = false;
     }
   }
 
@@ -94,6 +126,9 @@ export class SessionManager extends EventEmitter {
     this.engine.stopSession();
     this.currentConfig = null;
     this.isActive = false;
+    this.audioBuffers = [];
+    this.bufferedSamples = 0;
+    this.isProcessingChunk = false;
     this.sendSuggestionsToUI([]);
     this.emit('session-stopped');
   }

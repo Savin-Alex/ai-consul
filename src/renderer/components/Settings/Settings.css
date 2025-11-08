@@ -55,3 +55,58 @@
   font-size: 14px;
 }
 
+.microphone-select {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.microphone-select select {
+  flex: 1;
+}
+
+.btn.btn-small {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.settings-hint {
+  display: block;
+  margin-top: 6px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.mic-test-controls {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mic-test-status {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #374151;
+}
+
+.mic-test-status.recording {
+  color: #f59e0b;
+}
+
+.mic-test-status.playing {
+  color: #2563eb;
+}
+
+.mic-test-status.success {
+  color: #059669;
+}
+
+.mic-test-status.error {
+  color: #dc2626;
+}
+
+.mic-test-audio {
+  width: 100%;
+  margin-top: 8px;
+}
+

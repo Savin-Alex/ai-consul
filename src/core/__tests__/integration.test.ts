@@ -48,18 +48,25 @@ describe('Integration Tests', () => {
 
       // Mock initialization
       vi.spyOn(engine, 'initialize').mockResolvedValue(undefined);
-      vi.spyOn(engine, 'startSession').mockResolvedValue(undefined);
-      vi.spyOn(engine, 'stopSession').mockImplementation(() => {});
+      const startSessionSpy = vi
+        .spyOn(engine, 'startSession')
+        .mockResolvedValue(undefined);
+      const stopSessionSpy = vi
+        .spyOn(engine, 'stopSession')
+        .mockImplementation(() => {});
 
       await engine.initialize();
       await sessionManager.start(sessionConfig);
 
-      expect(engine.getCurrentSession()).toEqual(sessionConfig);
+      expect(startSessionSpy).toHaveBeenCalledWith(sessionConfig);
+      expect(sessionManager.getCurrentConfig()).toEqual(sessionConfig);
       expect(sessionManager.getIsActive()).toBe(true);
 
       await sessionManager.stop();
 
       expect(sessionManager.getIsActive()).toBe(false);
+      expect(sessionManager.getCurrentConfig()).toBeNull();
+      expect(stopSessionSpy).toHaveBeenCalledTimes(1);
     });
   });
 

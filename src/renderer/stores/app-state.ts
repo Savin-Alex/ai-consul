@@ -7,16 +7,21 @@ interface AppState {
   performanceTier: 'basic' | 'standard' | 'pro' | 'auto-detected';
   ollamaConnected: boolean;
   ollamaModel: string;
+  microphones: MediaDeviceInfo[];
+  selectedMicrophoneId: string;
   initialize: () => Promise<void>;
   completeOnboarding: (config: {
     audioSource: 'mic-only' | 'full-system-audio';
     privacyMode: 'local-first' | 'cloud-enabled';
     performanceTier: 'basic' | 'standard' | 'pro' | 'auto-detected';
+    selectedMicrophoneId?: string;
   }) => void;
   setOllamaStatus: (connected: boolean, model?: string) => void;
   setAudioSource: (source: 'mic-only' | 'full-system-audio') => void;
   setPrivacyMode: (mode: 'local-first' | 'cloud-enabled') => void;
   setPerformanceTier: (tier: 'basic' | 'standard' | 'pro' | 'auto-detected') => void;
+  setMicrophones: (devices: MediaDeviceInfo[]) => void;
+  setSelectedMicrophone: (deviceId: string) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -26,6 +31,8 @@ export const useAppStore = create<AppState>((set) => ({
   performanceTier: 'auto-detected',
   ollamaConnected: false,
   ollamaModel: 'llama3:8b',
+  microphones: [],
+  selectedMicrophoneId: 'default',
 
   initialize: async () => {
     // Load saved state from localStorage or config file
@@ -40,6 +47,7 @@ export const useAppStore = create<AppState>((set) => ({
           performanceTier: config.performanceTier || 'auto-detected',
           ollamaConnected: config.ollamaConnected || false,
           ollamaModel: config.ollamaModel || 'llama3:8b',
+          selectedMicrophoneId: config.selectedMicrophoneId || 'default',
         });
       } catch (e) {
         console.error('Failed to load config:', e);
@@ -53,6 +61,7 @@ export const useAppStore = create<AppState>((set) => ({
       audioSource: config.audioSource,
       privacyMode: config.privacyMode,
       performanceTier: config.performanceTier,
+      selectedMicrophoneId: config.selectedMicrophoneId || 'default',
     };
     set(state);
     localStorage.setItem('ai-consul-config', JSON.stringify(state));
@@ -103,6 +112,24 @@ export const useAppStore = create<AppState>((set) => ({
         localStorage.setItem('ai-consul-config', JSON.stringify(config));
       } catch (e) {
         console.error('Failed to save performance tier:', e);
+      }
+    }
+  },
+
+  setMicrophones: (devices) => {
+    set({ microphones: devices });
+  },
+
+  setSelectedMicrophone: (deviceId) => {
+    set({ selectedMicrophoneId: deviceId || 'default' });
+    const saved = localStorage.getItem('ai-consul-config');
+    if (saved) {
+      try {
+        const config = JSON.parse(saved);
+        config.selectedMicrophoneId = deviceId || 'default';
+        localStorage.setItem('ai-consul-config', JSON.stringify(config));
+      } catch (e) {
+        console.error('Failed to save selected microphone:', e);
       }
     }
   },

@@ -62,7 +62,7 @@ export interface Suggestion {
 export class AIConsulEngine {
   private config: EngineConfig;
   private localWhisper: LocalWhisper;
-  private cloudWhisper: CloudWhisper;
+  private cloudWhisper: CloudWhisper | null;
   private llmRouter: LLMRouter;
   private contextManager: ContextManager;
   private ragEngine: RAGEngine;
@@ -71,11 +71,30 @@ export class AIConsulEngine {
   private outputValidator: OutputValidator;
   private currentSession: SessionConfig | null = null;
   private isInitialized = false;
+  private initializationPromise: Promise<void> | null = null;
 
   constructor(config: EngineConfig) {
     this.config = config;
     this.localWhisper = new LocalWhisper();
-    this.cloudWhisper = new CloudWhisper();
+
+    const wantsCloudTranscription =
+      config.models.transcription.primary === 'cloud-whisper' ||
+      config.models.transcription.fallback === 'cloud-whisper';
+    const allowCloudFallback = config.privacy.cloudFallback || wantsCloudTranscription;
+
+    if (allowCloudFallback) {
+      try {
+        this.cloudWhisper = new CloudWhisper();
+      } catch (error) {
+        console.warn(
+          'Cloud Whisper initialization skipped:',
+          error instanceof Error ? error.message : error
+        );
+        this.cloudWhisper = null;
+      }
+    } else {
+      this.cloudWhisper = null;
+    }
     this.llmRouter = new LLMRouter(config);
     this.contextManager = new ContextManager({
       maxTokens: 4000,
@@ -92,64 +111,79 @@ export class AIConsulEngine {
 
   async initialize(): Promise<void> {
     if (this.isInitialized) {
-      console.log('Engine already initialized');
       return;
     }
 
-    try {
-      console.log('Starting engine initialization...');
-      
-      // Initialize RAG engine (fast, synchronous)
-      console.log('Initializing RAG engine...');
-      await this.ragEngine.initialize();
-      console.log('RAG engine initialized');
-
-      // Initialize Whisper in background (can take time, especially first load)
-      // Don't block on this - it will initialize when needed
-      if (
-        this.config.models.transcription.primary.startsWith('local-whisper')
-      ) {
-        const modelSize = this.config.models.transcription.primary.includes('base')
-          ? 'base'
-          : 'tiny';
-        console.log(`Starting Whisper initialization in background (model size: ${modelSize})...`);
-        // Initialize in background, don't wait
-        this.localWhisper.initialize(modelSize).then(() => {
-          console.log('Whisper initialized in background');
-        }).catch((error) => {
-          console.error('Whisper initialization failed (will retry when needed):', error);
-        });
-      }
-
-      this.isInitialized = true;
-      console.log('Engine initialization complete (Whisper loading in background)');
-    } catch (error) {
-      console.error('Error during engine initialization:', error);
-      throw error;
+    if (this.initializationPromise) {
+      return this.initializationPromise;
     }
+
+    this.initializationPromise = (async () => {
+      try {
+        console.log('Starting engine initialization...');
+
+        console.log('Initializing RAG engine...');
+        await this.ragEngine.initialize();
+        console.log('RAG engine initialized');
+
+        if (
+          this.config.models.transcription.primary.startsWith('local-whisper')
+        ) {
+          const modelSize = this.config.models.transcription.primary.includes('base')
+            ? 'base'
+            : 'tiny';
+          console.log(`Initializing Whisper model (model size: ${modelSize})...`);
+          await this.localWhisper.initialize(modelSize);
+          console.log('Whisper model initialized');
+        }
+
+        this.isInitialized = true;
+        console.log('Engine initialization complete');
+      } catch (error) {
+        console.error('Error during engine initialization:', error);
+        throw error;
+      } finally {
+        this.initializationPromise = null;
+      }
+    })();
+
+    return this.initializationPromise;
   }
 
-  async transcribe(audioChunk: Float32Array): Promise<string> {
+  async transcribe(audioChunk: Float32Array, sampleRate: number = 16000): Promise<string> {
     try {
       // Try primary transcription method
       if (
         this.config.models.transcription.primary.startsWith('local-whisper')
       ) {
-        const transcript = await this.localWhisper.transcribe(audioChunk);
-        if (transcript) {
-          return transcript;
+        try {
+          const transcript = await this.localWhisper.transcribe(audioChunk, sampleRate);
+          if (transcript && transcript.trim().length > 0) {
+            return transcript;
+          }
+          return '';
+        } catch (error) {
+          console.warn('Local Whisper transcription failed, attempting fallback if available.', error);
         }
+      } else if (
+        this.config.models.transcription.primary === 'cloud-whisper'
+      ) {
+        if (!this.cloudWhisper) {
+          throw new Error('Cloud transcription is unavailable: missing API key');
+        }
+        return await this.cloudWhisper.transcribe(audioChunk);
       }
 
       // Fallback to cloud if enabled
       if (
         this.config.models.transcription.fallback === 'cloud-whisper' &&
-        this.config.privacy.cloudFallback
+        this.config.privacy.cloudFallback &&
+        this.cloudWhisper
       ) {
         return await this.cloudWhisper.transcribe(audioChunk);
       }
 
-      throw new Error('Transcription failed');
+      return '';
     } catch (error) {
       console.error('Transcription error:', error);
       throw error;
@@ -194,9 +228,10 @@ export class AIConsulEngine {
   }
 
   async startSession(config: SessionConfig): Promise<void> {
+    await this.initialize();
+
     this.currentSession = config;
 
-    // Load RAG documents if provided
     if (config.context?.documents) {
       await this.ragEngine.loadDocuments(config.context.documents);
     }

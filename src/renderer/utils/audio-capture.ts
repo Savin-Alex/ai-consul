@@ -1,22 +1,24 @@
+type Listener = (...args: unknown[]) => void;
+
 // Simple EventEmitter implementation for browser
 class EventEmitter {
-  private listeners: Map<string, Function[]> = new Map();
+  private listeners: Map<string, Listener[]> = new Map();
 
-  on(event: string, callback: Function): void {
+  on(event: string, callback: Listener): void {
     if (!this.listeners.has(event)) {
       this.listeners.set(event, []);
     }
     this.listeners.get(event)!.push(callback);
   }
 
-  emit(event: string, ...args: any[]): void {
+  emit(event: string, ...args: unknown[]): void {
     const callbacks = this.listeners.get(event);
     if (callbacks) {
-      callbacks.forEach(callback => callback(...args));
+      callbacks.forEach((callback) => callback(...args));
     }
   }
 
-  off(event: string, callback: Function): void {
+  off(event: string, callback: Listener): void {
     const callbacks = this.listeners.get(event);
     if (callbacks) {
       const index = callbacks.indexOf(callback);
@@ -42,11 +44,13 @@ export class AudioCaptureManager extends EventEmitter {
   private isCapturing = false;
   private sampleRate = 16000;
   private channels = 1;
+  private deviceId: string | undefined;
 
   async startCapture(options: {
     sources?: ('microphone' | 'system-audio')[];
     sampleRate?: number;
     channels?: number;
+    deviceId?: string;
   } = {}): Promise<void> {
     if (this.isCapturing) {
       return;
@@ -55,17 +59,24 @@ export class AudioCaptureManager extends EventEmitter {
     const sources = options.sources || ['microphone'];
     this.sampleRate = options.sampleRate || 16000;
     this.channels = options.channels || 1;
+    this.deviceId = options.deviceId || undefined;
 
     try {
       // For microphone, use getUserMedia
       if (sources.includes('microphone')) {
+        const audioConstraints: MediaTrackConstraints = {
+          sampleRate: this.sampleRate,
+          channelCount: this.channels,
+          echoCancellation: true,
+          noiseSuppression: true,
+        };
+
+        if (this.deviceId && this.deviceId !== 'default') {
+          audioConstraints.deviceId = { exact: this.deviceId };
+        }
+
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            sampleRate: this.sampleRate,
-            channelCount: this.channels,
-            echoCancellation: true,
-            noiseSuppression: true,
-          },
+          audio: audioConstraints,
         });
 
         this.setupAudioProcessing(stream);
@@ -147,6 +158,20 @@ export class AudioCaptureManager extends EventEmitter {
 
   getIsCapturing(): boolean {
     return this.isCapturing;
+  }
+
+  async listInputDevices(): Promise<MediaDeviceInfo[]> {
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      return [];
+    }
+
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices.filter((device) => device.kind === 'audioinput');
+    } catch (error) {
+      console.error('Failed to enumerate audio devices:', error);
+      return [];
+    }
   }
 }
 
