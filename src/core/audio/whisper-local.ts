@@ -21,10 +21,10 @@ export class LocalWhisper {
   private model: any = null;
   private processor: any = null;
   private isInitialized = false;
-  private modelSize: 'tiny' | 'base' = 'tiny';
+  private modelSize: 'tiny' | 'base' = 'base';
   private initializationPromise: Promise<void> | null = null;
 
-  async initialize(modelSize: 'tiny' | 'base' = 'tiny'): Promise<void> {
+  async initialize(modelSize: 'tiny' | 'base' = 'base'): Promise<void> {
     if (this.isInitialized && this.modelSize === modelSize) {
       return;
     }
@@ -63,7 +63,7 @@ export class LocalWhisper {
     return this.initializationPromise;
   }
 
-  async transcribe(audioChunk: Float32Array, sampleRate: number = 16000): Promise<string> {
+  async transcribe(audioChunk: Float32Array<ArrayBufferLike>, sampleRate: number = 16000): Promise<string> {
     if (!this.isInitialized) {
       await this.initialize();
     }
@@ -76,10 +76,27 @@ export class LocalWhisper {
         sampling_rate: sampleRate,
       };
 
+      if (process.env.DEBUG_AUDIO === 'true') {
+        console.log(`[whisper] transcribing ${audioChunk.length} samples at ${sampleRate}Hz (${audioChunk.length / sampleRate}s)`);
+        console.log(`[whisper] audio data stats:`, {
+          length: audioChunk.length,
+          max: Math.max(...Array.from(audioChunk)),
+          min: Math.min(...Array.from(audioChunk)),
+          avg: audioChunk.reduce((sum, val) => sum + Math.abs(val), 0) / audioChunk.length,
+          sampleRate: sampleRate,
+          expectedDuration: audioChunk.length / sampleRate
+        });
+      }
+
       const result = await this.processor(audioData, {
         return_timestamps: false,
-        chunk_length_s: 30,
+        chunk_length_s: 2, // Match our 1.5s buffer size
       });
+
+      if (process.env.DEBUG_AUDIO === 'true') {
+        console.log(`[whisper] result:`, result);
+        console.log(`[whisper] extracted text: "${result.text}"`);
+      }
 
       return result.text || '';
     } catch (error) {

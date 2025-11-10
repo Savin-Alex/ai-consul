@@ -150,7 +150,7 @@ export class AIConsulEngine {
     return this.initializationPromise;
   }
 
-  async transcribe(audioChunk: Float32Array, sampleRate: number = 16000): Promise<string> {
+  async transcribe(audioChunk: Float32Array<ArrayBufferLike>, sampleRate: number = 16000): Promise<string> {
     try {
       // Try primary transcription method
       if (

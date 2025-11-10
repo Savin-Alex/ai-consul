@@ -95,6 +95,10 @@ export class AudioCaptureManager extends EventEmitter {
   private setupAudioProcessing(stream: MediaStream): void {
     this.mediaStream = stream;
     this.audioContext = new AudioContext({ sampleRate: this.sampleRate });
+    // Update actual sample rate in case the browser chooses a different value
+    if (this.audioContext.sampleRate && this.audioContext.sampleRate !== this.sampleRate) {
+      this.sampleRate = this.audioContext.sampleRate;
+    }
     this.sourceNode = this.audioContext.createMediaStreamSource(stream);
 
     // Create script processor for chunking (deprecated but works)
@@ -114,9 +118,21 @@ export class AudioCaptureManager extends EventEmitter {
       const float32Array = new Float32Array(channelData.length);
       float32Array.set(channelData);
 
+      // Debug logging for audio processing
+      const maxAmplitude = Math.max(...Array.from(float32Array));
+      const avgAmplitude = float32Array.reduce((sum, val) => sum + Math.abs(val), 0) / float32Array.length;
+
+      console.log('[audio-capture] onaudioprocess fired:', {
+        bufferLength: float32Array.length,
+        maxAmplitude: maxAmplitude,
+        avgAmplitude: avgAmplitude,
+        sampleRate: this.audioContext.sampleRate,
+        isCapturing: this.isCapturing
+      });
+
       const chunk: AudioChunk = {
         data: float32Array,
-        sampleRate: this.sampleRate,
+        sampleRate: this.audioContext.sampleRate,
         channels: this.channels,
         timestamp: Date.now(),
       };

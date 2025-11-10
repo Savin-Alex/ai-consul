@@ -5,7 +5,7 @@
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "concurrently \"pnpm run dev:main\" \"pnpm run dev:renderer\"",
-    "dev:main": "tsc -p tsconfig.main.json && electron .",
+    "dev:main": "tsc -p tsconfig.main.json && DEBUG_AUDIO=true electron .",
     "dev:renderer": "vite",
     "build": "pnpm run build:main && pnpm run build:renderer",
     "build:main": "tsc -p tsconfig.main.json && tsc -p tsconfig.preload.json",

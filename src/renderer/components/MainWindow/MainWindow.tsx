@@ -55,6 +55,14 @@ const MainWindow: React.FC = () => {
 
     // Set up audio chunk handler
     manager.on('audio-chunk', (chunk: AudioChunk) => {
+      console.log('[renderer] Audio chunk received from manager:', {
+        dataLength: chunk.data.length,
+        sampleRate: chunk.sampleRate,
+        maxAmplitude: Math.max(...Array.from(chunk.data)),
+        avgAmplitude: chunk.data.reduce((sum, val) => sum + Math.abs(val), 0) / chunk.data.length,
+        timestamp: chunk.timestamp
+      });
+
       // Send audio chunk to main process for processing
       if (window.electronAPI) {
         // Convert Float32Array to regular array for IPC
@@ -64,7 +72,10 @@ const MainWindow: React.FC = () => {
           channels: chunk.channels,
           timestamp: chunk.timestamp,
         };
+        console.log('[renderer] Sending audio chunk to main process');
         window.electronAPI.send('audio-chunk', chunkData);
+      } else {
+        console.error('[renderer] window.electronAPI not available for sending audio chunk');
       }
     });
 
@@ -128,22 +139,29 @@ const MainWindow: React.FC = () => {
       checkReadyInterval = setInterval(checkReady, 500);
 
       window.electronAPI.on('start-audio-capture', async (config: AudioCaptureConfig) => {
+        console.log('[renderer] Received start-audio-capture event with config:', config);
         try {
           const captureConfig = {
             ...config,
             deviceId: selectedMicrophoneRef.current,
           };
+          console.log('[renderer] Starting audio capture with config:', captureConfig);
           await manager.startCapture(captureConfig);
+          console.log('[renderer] Audio capture started successfully');
         } catch (err: unknown) {
+          console.error('[renderer] Failed to start audio capture:', err);
           setError(getErrorMessage(err) || 'Failed to start audio capture');
         }
       });
 
       window.electronAPI.on('stop-audio-capture', async () => {
+        console.log('[renderer] Received stop-audio-capture event');
         try {
           await manager.stopCapture();
+          console.log('[renderer] Audio capture stopped successfully');
         } catch (err: unknown) {
-          console.error('Failed to stop audio capture:', err);
+          console.error('[renderer] Failed to stop audio capture:', err);
+          setError(getErrorMessage(err) || 'Failed to stop audio capture');
         }
       });
 
@@ -189,13 +207,20 @@ const MainWindow: React.FC = () => {
   }, [setMicrophones]);
 
   const handleStartSession = async () => {
+    console.log('[renderer] handleStartSession called');
+    console.log('[renderer] window.electronAPI available:', !!window.electronAPI);
+    console.log('[renderer] isReady:', isReady);
+    console.log('[renderer] selectedMode:', selectedMode);
+
     if (!window.electronAPI) {
       setError('Electron API not available');
+      console.error('[renderer] Electron API not available');
       return;
     }
 
     if (!isReady) {
       setError('App is still initializing. Please wait...');
+      console.error('[renderer] App not ready');
       return;
     }
 
@@ -208,11 +233,19 @@ const MainWindow: React.FC = () => {
         },
       };
 
+      console.log('[renderer] Invoking start-session with config:', config);
       const result = await window.electronAPI.invoke('start-session', config) as StartStopResponse;
+      console.log('[renderer] start-session result:', result);
+
       if (result?.success) {
         setSessionStatus({ isActive: true, mode: selectedMode });
+        console.log('[renderer] Session started successfully, UI updated');
+      } else {
+        console.error('[renderer] Session start failed:', result);
+        setError('Failed to start session');
       }
     } catch (err: unknown) {
+      console.error('[renderer] Error starting session:', err);
       setError(getErrorMessage(err) || 'Failed to start session');
     }
   };
@@ -233,13 +266,20 @@ const MainWindow: React.FC = () => {
   };
 
   const handlePauseSession = async () => {
+    console.log('[renderer] handlePauseSession called');
+    console.log('[renderer] sessionStatus.isActive:', sessionStatus.isActive);
+
     if (!window.electronAPI) {
+      console.error('[renderer] Electron API not available for pause');
       return;
     }
 
     try {
+      console.log('[renderer] Invoking pause-session');
       await window.electronAPI.invoke('pause-session');
+      console.log('[renderer] pause-session completed');
     } catch (err: unknown) {
+      console.error('[renderer] Error pausing session:', err);
       setError(getErrorMessage(err) || 'Failed to pause session');
     }
   };

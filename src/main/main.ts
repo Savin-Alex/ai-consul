@@ -120,7 +120,7 @@ ipcMain.handle('session-manager-ready', () => {
           },
           models: {
             transcription: {
-              primary: 'local-whisper-tiny',
+              primary: 'local-whisper-base',
               fallback: 'cloud-whisper',
             },
             llm: {
@@ -164,11 +164,15 @@ ipcMain.handle('session-manager-ready', () => {
 
 // Session management IPC handlers - registered at module load, sessionManager checked at runtime
 ipcMain.handle('start-session', async (_event, config) => {
+  console.log('[main] start-session IPC handler called with config:', config);
   if (!sessionManager) {
+    console.error('[main] Session manager not initialized');
     throw new Error('Session manager not initialized. Please wait for the app to finish loading.');
   }
   try {
+    console.log('[main] Calling sessionManager.start()');
     await sessionManager.start(config);
+    console.log('[main] sessionManager.start() completed successfully');
     // Send status update to renderer
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('session-status', { isActive: true, mode: config.mode });
@@ -218,18 +222,42 @@ ipcMain.handle('pause-session', async () => {
 
 // Handle audio chunks from renderer
 ipcMain.on('audio-chunk', async (_event, chunkData: { data: number[]; sampleRate: number; channels: number; timestamp: number }) => {
-  if (!sessionManager) return;
-  
-  // Convert array back to Float32Array
-  const float32Array = new Float32Array(chunkData.data);
-  const chunk = {
-    data: float32Array,
-    sampleRate: chunkData.sampleRate,
-    channels: chunkData.channels,
-    timestamp: chunkData.timestamp,
-  };
-  
-  await sessionManager.processAudioChunk(chunk);
+  try {
+    console.log('[main] audio-chunk IPC received:', {
+      dataLength: chunkData.data?.length,
+      sampleRate: chunkData.sampleRate,
+      channels: chunkData.channels,
+      timestamp: chunkData.timestamp,
+      hasSessionManager: !!sessionManager
+    });
+
+    if (!sessionManager) {
+      console.error('[main] No session manager available');
+      return;
+    }
+
+    // Convert array back to Float32Array
+    const float32Array = new Float32Array(chunkData.data);
+    const chunk = {
+      data: float32Array,
+      sampleRate: chunkData.sampleRate,
+      channels: chunkData.channels,
+      timestamp: chunkData.timestamp,
+    };
+
+    console.log('[main] Processing audio chunk:', {
+      dataLength: float32Array.length,
+      sampleRate: chunk.sampleRate,
+      channels: chunk.channels,
+      maxAmplitude: Math.max(...Array.from(float32Array)),
+      avgAmplitude: float32Array.reduce((sum, val) => sum + Math.abs(val), 0) / float32Array.length
+    });
+
+    await sessionManager.processAudioChunk(chunk);
+    console.log('[main] Audio chunk processed successfully');
+  } catch (error) {
+    console.error('[main] Error processing audio chunk:', error);
+  }
 });
 
 // Initialize immediately when app is ready
