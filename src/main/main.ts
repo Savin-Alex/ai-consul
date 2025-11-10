@@ -290,7 +290,7 @@ app.whenReady().then(async () => {
     },
     models: {
       transcription: {
-        primary: 'local-whisper-tiny',
+        primary: 'local-whisper-base',
         fallback: 'cloud-whisper',
       },
       llm: {

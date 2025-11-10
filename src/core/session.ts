@@ -85,7 +85,7 @@ export class SessionManager extends EventEmitter {
       this.bufferedSamples += chunk.data.length;
       this.currentSampleRate = chunk.sampleRate || this.currentSampleRate;
 
-      const minSamples = Math.round(this.currentSampleRate * 1.5); // ~1.5 seconds
+      const minSamples = Math.round(this.currentSampleRate * 2.5); // ~2.5 seconds for Whisper chunk alignment
 
       if (process.env.DEBUG_AUDIO === 'true') {
         console.log('[session] buffer status:', {

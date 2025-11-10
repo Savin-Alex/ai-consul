@@ -69,13 +69,6 @@ export class LocalWhisper {
     }
 
     try {
-      // Convert Float32Array to format expected by transformers
-      // The pipeline expects audio in a specific format
-      const audioData = {
-        raw: audioChunk,
-        sampling_rate: sampleRate,
-      };
-
       if (process.env.DEBUG_AUDIO === 'true') {
         console.log(`[whisper] transcribing ${audioChunk.length} samples at ${sampleRate}Hz (${audioChunk.length / sampleRate}s)`);
         console.log(`[whisper] audio data stats:`, {
@@ -88,9 +81,9 @@ export class LocalWhisper {
         });
       }
 
-      const result = await this.processor(audioData, {
+      const result = await this.processor(audioChunk, {
         return_timestamps: false,
-        chunk_length_s: 2, // Match our 1.5s buffer size
+        sampling_rate: sampleRate,
       });
 
       if (process.env.DEBUG_AUDIO === 'true') {
