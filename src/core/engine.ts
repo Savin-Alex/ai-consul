@@ -191,7 +191,10 @@ export class AIConsulEngine {
   }
 
   async generateSuggestions(transcription: string): Promise<Suggestion[]> {
-    if (!this.currentSession) {
+    const session = this.currentSession;
+
+    if (!session) {
+      console.warn('[engine] generateSuggestions called with no active session. Skipping.');
       return [];
     }
 
@@ -204,7 +207,7 @@ export class AIConsulEngine {
 
     // Build prompt with mode awareness
     const prompt = this.promptBuilder.buildPrompt(
-      this.currentSession.mode as any, // Type assertion for mode compatibility
+      session.mode as any, // Type assertion for mode compatibility
       this.contextManager.getContext(),
       this.ragEngine.getRelevantContext(transcription)
     );
@@ -218,7 +221,7 @@ export class AIConsulEngine {
     // Validate output
     const validated = this.outputValidator.validate(
       llmResponse,
-      this.currentSession.mode as any // Type assertion for mode compatibility
+      session.mode as any // Type assertion for mode compatibility
     );
 
     return validated.suggestions.map((text) => ({
@@ -228,8 +231,6 @@ export class AIConsulEngine {
   }
 
   async startSession(config: SessionConfig): Promise<void> {
-    await this.initialize();
-
     this.currentSession = config;
 
     if (config.context?.documents) {

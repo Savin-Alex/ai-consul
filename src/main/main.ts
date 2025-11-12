@@ -120,7 +120,7 @@ ipcMain.handle('session-manager-ready', () => {
           },
           models: {
             transcription: {
-              primary: 'local-whisper-base',
+              primary: 'local-whisper-tiny',
               fallback: 'cloud-whisper',
             },
             llm: {
@@ -290,7 +290,7 @@ app.whenReady().then(async () => {
     },
     models: {
       transcription: {
-        primary: 'local-whisper-base',
+        primary: 'local-whisper-tiny',
         fallback: 'cloud-whisper',
       },
       llm: {
