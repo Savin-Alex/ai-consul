@@ -6,6 +6,7 @@ import { RAGEngine } from './context/rag-engine';
 import { SecureDataFlow } from './security/privacy';
 import { PromptBuilder } from './prompts/builder';
 import { OutputValidator } from './prompts/validator';
+import { VADProcessor } from './audio/vad';
 // Load JSON at runtime using fs to avoid import path issues
 import * as fs from 'fs';
 import * as path from 'path';
@@ -72,6 +73,7 @@ export class AIConsulEngine {
   private currentSession: SessionConfig | null = null;
   private isInitialized = false;
   private initializationPromise: Promise<void> | null = null;
+  private vadProcessor: VADProcessor | null = null;
 
   constructor(config: EngineConfig) {
     this.config = config;
@@ -137,6 +139,13 @@ export class AIConsulEngine {
           console.log('Whisper model initialized');
         }
 
+        if (!this.vadProcessor) {
+          console.log('[engine] Initializing VAD...');
+          this.vadProcessor = new VADProcessor();
+          await this.vadProcessor.isReady();
+          console.log('[engine] VAD initialized');
+        }
+
         this.isInitialized = true;
         console.log('Engine initialization complete');
       } catch (error) {
@@ -148,6 +157,10 @@ export class AIConsulEngine {
     })();
 
     return this.initializationPromise;
+  }
+
+  public getVADProcessor(): VADProcessor | null {
+    return this.vadProcessor;
   }
 
   async transcribe(audioChunk: Float32Array<ArrayBufferLike>, sampleRate: number = 16000): Promise<string> {
@@ -233,6 +246,10 @@ export class AIConsulEngine {
   async startSession(config: SessionConfig): Promise<void> {
     this.currentSession = config;
 
+    if (this.vadProcessor) {
+      this.vadProcessor.resetState();
+    }
+
     if (config.context?.documents) {
       await this.ragEngine.loadDocuments(config.context.documents);
     }
@@ -240,6 +257,9 @@ export class AIConsulEngine {
 
   stopSession(): void {
     this.currentSession = null;
+    if (this.vadProcessor) {
+      this.vadProcessor.resetState();
+    }
     this.contextManager.clearExpiredData();
     this.secureDataFlow.cleanupSensitiveData();
   }

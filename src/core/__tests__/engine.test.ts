@@ -10,6 +10,14 @@ vi.mock('../audio/whisper-local');
 vi.mock('../audio/whisper-cloud');
 vi.mock('../llm/router');
 vi.mock('../context/rag-engine');
+vi.mock('../audio/vad', () => {
+  const VADProcessor = vi.fn().mockImplementation(function MockVAD(this: any) {
+    this.isReady = vi.fn().mockResolvedValue(undefined);
+    this.resetState = vi.fn();
+    this.process = vi.fn().mockResolvedValue({ speech: false, pause: false });
+  });
+  return { VADProcessor };
+});
 
 describe('AIConsulEngine', () => {
   let engine: AIConsulEngine;

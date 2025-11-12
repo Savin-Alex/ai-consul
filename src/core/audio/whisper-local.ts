@@ -84,6 +84,8 @@ export class LocalWhisper {
       const result = await this.processor(audioChunk, {
         return_timestamps: false,
         sampling_rate: sampleRate,
+        language: 'english',
+        task: 'transcribe',
       });
 
       if (process.env.DEBUG_AUDIO === 'true') {

@@ -8,6 +8,7 @@ import { setupErrorHandling } from '../utils/error-handler';
 
 let mainWindow: BrowserWindow | null = null;
 let companionWindow: BrowserWindow | null = null;
+let transcriptWindow: BrowserWindow | null = null;
 let engine: AIConsulEngine | null = null;
 let sessionManager: SessionManager | null = null;
 
@@ -71,6 +72,34 @@ function createCompanionWindow(): void {
   });
 }
 
+function createTranscriptWindow(): void {
+  transcriptWindow = new BrowserWindow({
+    width: 500,
+    height: 600,
+    minWidth: 320,
+    minHeight: 400,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js'),
+      sandbox: false,
+    },
+    title: 'AI Consul Transcript',
+  });
+
+  if (isDev) {
+    transcriptWindow.loadURL('http://localhost:5173/transcript');
+  } else {
+    transcriptWindow.loadFile(path.join(__dirname, '../renderer/index.html'), {
+      hash: 'transcript',
+    });
+  }
+
+  transcriptWindow.on('closed', () => {
+    transcriptWindow = null;
+  });
+}
+
 // IPC Handlers
 ipcMain.handle('get-desktop-sources', async () => {
   const sources = await desktopCapturer.getSources({
@@ -120,7 +149,7 @@ ipcMain.handle('session-manager-ready', () => {
           },
           models: {
             transcription: {
-              primary: 'local-whisper-tiny',
+              primary: 'local-whisper-base',
               fallback: 'cloud-whisper',
             },
             llm: {
@@ -143,7 +172,7 @@ ipcMain.handle('session-manager-ready', () => {
         console.log('Session manager created successfully in IPC handler');
         
         if (mainWindow && companionWindow) {
-          sessionManager.setWindows(mainWindow, companionWindow);
+          sessionManager.setWindows(mainWindow, companionWindow, transcriptWindow ?? undefined);
           console.log('Session manager windows set in IPC handler');
         } else {
           console.warn('Windows not available in IPC handler');
@@ -270,6 +299,7 @@ app.whenReady().then(async () => {
   console.log('Creating windows...');
   createMainWindow();
   createCompanionWindow();
+  createTranscriptWindow();
   console.log('Windows created');
   
   // Wait a moment for windows to be fully created
@@ -290,7 +320,7 @@ app.whenReady().then(async () => {
     },
     models: {
       transcription: {
-        primary: 'local-whisper-tiny',
+        primary: 'local-whisper-base',
         fallback: 'cloud-whisper',
       },
       llm: {
@@ -314,7 +344,7 @@ app.whenReady().then(async () => {
     
     // Set windows if they exist
     if (mainWindow && companionWindow) {
-      sessionManager.setWindows(mainWindow, companionWindow);
+      sessionManager.setWindows(mainWindow, companionWindow, transcriptWindow ?? undefined);
       console.log('Session manager windows set');
     } else {
       console.warn('Windows not ready, session manager created without window context');
@@ -387,8 +417,9 @@ app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createMainWindow();
       createCompanionWindow();
+      createTranscriptWindow();
       if (sessionManager && mainWindow && companionWindow) {
-        sessionManager.setWindows(mainWindow, companionWindow);
+        sessionManager.setWindows(mainWindow, companionWindow, transcriptWindow ?? undefined);
       }
     }
   });

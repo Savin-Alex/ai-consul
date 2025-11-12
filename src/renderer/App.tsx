@@ -4,6 +4,7 @@ import Onboarding from './components/Onboarding/Onboarding';
 import Settings from './components/Settings/Settings';
 import CompanionWindow from './components/CompanionWindow/CompanionWindow';
 import MainWindow from './components/MainWindow/MainWindow';
+import TranscriptionWindow from './components/TranscriptionWindow/TranscriptionWindow';
 import { useAppStore } from './stores/app-state';
 
 declare global {
@@ -12,7 +13,9 @@ declare global {
       getDesktopSources: () => Promise<Array<{ id: string; name: string }>>;
       getAppVersion: () => Promise<string>;
       getPlatform: () => Promise<string>;
+      invoke: (channel: string, data?: any) => Promise<unknown>;
       on: (channel: string, callback: (...args: any[]) => void) => void;
+      removeListener: (channel: string, callback: (...args: any[]) => void) => void;
       send: (channel: string, data: any) => void;
     };
   }
@@ -45,6 +48,10 @@ const router = createBrowserRouter([
   {
     path: '/companion',
     element: <CompanionWindow />,
+  },
+  {
+    path: '/transcript',
+    element: <TranscriptionWindow />,
   },
 ]);
 

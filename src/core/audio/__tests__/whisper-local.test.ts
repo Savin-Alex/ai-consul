@@ -20,6 +20,8 @@ describe('LocalWhisper', () => {
     expect(processorMock).toHaveBeenCalledWith(chunk, {
       return_timestamps: false,
       sampling_rate: 16000,
+      language: 'english',
+      task: 'transcribe',
     });
   });
 

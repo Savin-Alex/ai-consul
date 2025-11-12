@@ -14,9 +14,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return Promise.reject(new Error(`Invalid channel: ${channel}`));
   },
   on: (channel: string, callback: (...args: any[]) => void) => {
-    const validChannels = ['suggestions-update', 'session-status', 'error', 'start-audio-capture', 'stop-audio-capture', 'session-manager-ready'];
+    const validChannels = ['suggestions-update', 'transcriptions-update', 'session-status', 'error', 'start-audio-capture', 'stop-audio-capture', 'session-manager-ready'];
     if (validChannels.includes(channel)) {
       ipcRenderer.on(channel, (_event, ...args) => callback(...args));
+    }
+  },
+  removeListener: (channel: string, callback: (...args: any[]) => void) => {
+    const validChannels = ['suggestions-update', 'transcriptions-update', 'session-status', 'error', 'start-audio-capture', 'stop-audio-capture', 'session-manager-ready'];
+    if (validChannels.includes(channel)) {
+      ipcRenderer.removeListener(channel, callback);
     }
   },
   send: (channel: string, data: any) => {
