@@ -74,10 +74,14 @@ export class VADProcessor {
 
   private speechDetected = false;
   private accumulatedSilenceMs = 0;
+  private silenceChunkCount = 0;
 
   private readonly sampleRate = 16000;
-  private readonly minSilenceDurationMs = 500;
+  private readonly minSilenceDurationMs = 1200;
   private readonly speechThreshold = 0.5;
+  private readonly energyThreshold = 0.01;
+  private readonly speechConfidenceThreshold = 0.25;
+  private readonly pauseDelayChunks = 5;
 
   constructor() {
     this.initializationPromise = this.initialize();
@@ -132,12 +136,20 @@ export class VADProcessor {
     }
     this.speechDetected = false;
     this.accumulatedSilenceMs = 0;
+    this.silenceChunkCount = 0;
     if (process.env.DEBUG_AUDIO === 'true') {
       console.log('[VAD] State reset');
     }
   }
 
-  public async process(audioChunk: Float32Array): Promise<VADResult> {
+  public async process(audioChunk: Float32Array, maxAmplitude?: number): Promise<VADResult> {
+    if (!audioChunk || audioChunk.length === 0) {
+      if (process.env.DEBUG_AUDIO === 'true') {
+        console.warn('[VAD] Received empty audio chunk, skipping.');
+      }
+      return { speech: false, pause: false };
+    }
+
     if (this.initializationError) {
       throw this.initializationError;
     }
@@ -157,12 +169,17 @@ export class VADProcessor {
 
       let silenceScore = 0;
       let speechScore = 0;
+      let topResult: { label: string; score: number } | null = null;
 
       for (const item of outputs) {
         if (!item || typeof item !== 'object') continue;
         const rawLabel = typeof item.label === 'string' ? item.label : '';
         const label = rawLabel.toLowerCase();
         const score = typeof item.score === 'number' ? item.score : 0;
+
+        if (!topResult || score > topResult.score) {
+          topResult = { label: rawLabel, score };
+        }
 
         if (rawLabel === '_unknown_' || label.includes('unknown')) {
           silenceScore = Math.max(silenceScore, score);
@@ -171,29 +188,63 @@ export class VADProcessor {
         }
       }
 
-      const hasSpeech = speechScore >= this.speechThreshold && speechScore >= silenceScore;
+      const topLabel = topResult?.label ?? '';
+      const topScore = topResult?.score ?? 0;
+      const isUnknownTop =
+        topLabel === '_unknown_' || topLabel.toLowerCase().includes('unknown');
+      const energyLevel =
+        typeof maxAmplitude === 'number' ? maxAmplitude : this.computeMaxAmplitude(audioChunk);
+
+      const meetsEnergy = energyLevel >= this.energyThreshold;
+      const meetsConfidence = topScore >= this.speechConfidenceThreshold;
+      const isSpeech = meetsEnergy && meetsConfidence && !isUnknownTop;
 
       const chunkDurationMs = (audioChunk.length / this.sampleRate) * 1000;
       let pauseDetected = false;
 
-      if (hasSpeech) {
+      if (isSpeech) {
         this.speechDetected = true;
         this.accumulatedSilenceMs = 0;
+        this.silenceChunkCount = 0;
       } else if (this.speechDetected) {
         this.accumulatedSilenceMs += chunkDurationMs;
+        this.silenceChunkCount += 1;
         if (this.accumulatedSilenceMs >= this.minSilenceDurationMs) {
           pauseDetected = true;
           this.speechDetected = false;
           this.accumulatedSilenceMs = 0;
+          this.silenceChunkCount = 0;
+        } else if (this.silenceChunkCount >= this.pauseDelayChunks) {
+          pauseDetected = true;
+          this.speechDetected = false;
+          this.accumulatedSilenceMs = 0;
+          this.silenceChunkCount = 0;
         }
       }
 
+      const speechActive = isSpeech || this.speechDetected;
+
       if (process.env.DEBUG_AUDIO === 'true') {
-        console.log('[VAD] scores:', { speechScore, silenceScore, hasSpeech, pauseDetected });
+        const topLabel = topResult
+          ? `${topResult.label} (${topResult.score.toFixed(2)})`
+          : 'n/a';
+        console.log('[VAD] scores:', {
+          top: topLabel,
+          silenceScore: silenceScore.toFixed(2),
+          speechScore: speechScore.toFixed(2),
+          energy: energyLevel.toFixed(4),
+          meetsEnergy,
+          topScore: topScore.toFixed(2),
+          meetsConfidence,
+          isUnknownTop,
+          isSpeech,
+          speechActive,
+          pauseDetected,
+        });
       }
 
       return {
-        speech: this.speechDetected || hasSpeech,
+        speech: speechActive,
         pause: pauseDetected,
       };
     } catch (error) {
@@ -213,6 +264,17 @@ export class VADProcessor {
     }
 
     return new Error('Unknown error during VAD initialization');
+  }
+
+  private computeMaxAmplitude(buffer: Float32Array): number {
+    let max = 0;
+    for (let i = 0; i < buffer.length; i++) {
+      const value = Math.abs(buffer[i]);
+      if (value > max) {
+        max = value;
+      }
+    }
+    return max;
   }
 }
 

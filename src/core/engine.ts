@@ -27,7 +27,7 @@ export interface EngineConfig {
   };
   models: {
     transcription: {
-      primary: 'local-whisper-tiny' | 'local-whisper-base' | 'cloud-whisper';
+      primary: 'local-whisper-tiny' | 'local-whisper-base' | 'local-whisper-small' | 'cloud-whisper';
       fallback: 'cloud-whisper';
     };
     llm: {
@@ -131,9 +131,12 @@ export class AIConsulEngine {
         if (
           this.config.models.transcription.primary.startsWith('local-whisper')
         ) {
-          const modelSize = this.config.models.transcription.primary.includes('base')
-            ? 'base'
-            : 'tiny';
+          let modelSize: 'tiny' | 'base' | 'small' = 'tiny';
+          if (this.config.models.transcription.primary.includes('small')) {
+            modelSize = 'small';
+          } else if (this.config.models.transcription.primary.includes('base')) {
+            modelSize = 'base';
+          }
           console.log(`Initializing Whisper model (model size: ${modelSize})...`);
           await this.localWhisper.initialize(modelSize);
           console.log('Whisper model initialized');

@@ -22,6 +22,7 @@ describe('SessionManager', () => {
     sampleRate: 16000,
     channels: 1,
     timestamp: Date.now(),
+    maxAmplitude: 0.1,
   });
 
   beforeEach(() => {
@@ -64,6 +65,7 @@ describe('SessionManager', () => {
     expect(bufferArg.length).toBe(1600);
     expect(sampleRateArg).toBe(16000);
     expect(engineMock.generateSuggestions).toHaveBeenCalledWith('mock transcript');
+    expect(vadMock.process).toHaveBeenCalledWith(expect.any(Float32Array), 0.1);
   });
 
   it('does not transcribe until a pause is detected', async () => {
@@ -73,5 +75,6 @@ describe('SessionManager', () => {
     await sessionManager.processAudioChunk(createChunk());
 
     expect(engineMock.transcribe).not.toHaveBeenCalled();
+    expect(vadMock.process).toHaveBeenCalledWith(expect.any(Float32Array), 0.1);
   });
 });

@@ -267,19 +267,26 @@ ipcMain.on('audio-chunk', async (_event, chunkData: { data: number[]; sampleRate
 
     // Convert array back to Float32Array
     const float32Array = new Float32Array(chunkData.data);
+    const maxAmplitude = float32Array.reduce(
+      (max, value) => Math.max(max, Math.abs(value)),
+      0
+    );
+    const avgAmplitude =
+      float32Array.reduce((sum, val) => sum + Math.abs(val), 0) / float32Array.length;
     const chunk = {
       data: float32Array,
       sampleRate: chunkData.sampleRate,
       channels: chunkData.channels,
       timestamp: chunkData.timestamp,
+      maxAmplitude,
     };
 
     console.log('[main] Processing audio chunk:', {
       dataLength: float32Array.length,
       sampleRate: chunk.sampleRate,
       channels: chunk.channels,
-      maxAmplitude: Math.max(...Array.from(float32Array)),
-      avgAmplitude: float32Array.reduce((sum, val) => sum + Math.abs(val), 0) / float32Array.length
+      maxAmplitude,
+      avgAmplitude,
     });
 
     await sessionManager.processAudioChunk(chunk);

@@ -21,10 +21,10 @@ export class LocalWhisper {
   private model: any = null;
   private processor: any = null;
   private isInitialized = false;
-  private modelSize: 'tiny' | 'base' = 'base';
+  private modelSize: 'tiny' | 'base' | 'small' = 'base';
   private initializationPromise: Promise<void> | null = null;
 
-  async initialize(modelSize: 'tiny' | 'base' = 'base'): Promise<void> {
+  async initialize(modelSize: 'tiny' | 'base' | 'small' = 'base'): Promise<void> {
     if (this.isInitialized && this.modelSize === modelSize) {
       return;
     }
@@ -64,8 +64,24 @@ export class LocalWhisper {
   }
 
   async transcribe(audioChunk: Float32Array<ArrayBufferLike>, sampleRate: number = 16000): Promise<string> {
+    if (!audioChunk || audioChunk.length === 0) {
+      if (process.env.DEBUG_AUDIO === 'true') {
+        console.warn('[whisper] Received empty audio buffer, skipping transcription.');
+      }
+      return '';
+    }
+
+    // Ensure model is fully initialized before transcribing
     if (!this.isInitialized) {
       await this.initialize();
+    } else if (this.initializationPromise) {
+      // Wait for ongoing initialization to complete
+      await this.initializationPromise;
+    }
+
+    // Double-check processor is ready
+    if (!this.processor) {
+      throw new Error('Whisper processor is not available. Model may not be fully initialized.');
     }
 
     try {

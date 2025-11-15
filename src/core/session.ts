@@ -13,11 +13,11 @@ export interface AudioChunk {
   sampleRate: number;
   channels: number;
   timestamp: number;
+  maxAmplitude?: number;
 }
 
 export class SessionManager extends EventEmitter {
   private engine: AIConsulEngine;
-  private vad: VADProcessor | null = null;
   private isActive = false;
   private currentConfig: SessionConfig | null = null;
   private mainWindow: BrowserWindow | null = null;
@@ -27,12 +27,12 @@ export class SessionManager extends EventEmitter {
   private isTranscribing = false;
   private currentSampleRate = 16000;
   private targetSampleRate = 16000;
+  private readonly maxBufferedDurationSeconds = 5.5;
   private transcripts: TranscriptEntry[] = [];
 
   constructor(engine: AIConsulEngine) {
     super();
     this.engine = engine;
-    this.vad = this.engine.getVADProcessor();
   }
 
   setWindows(
@@ -84,14 +84,13 @@ export class SessionManager extends EventEmitter {
       return;
     }
 
-    const vad = this.vad ?? this.engine.getVADProcessor();
+    const vad = this.engine.getVADProcessor();
     if (!vad) {
       if (process.env.DEBUG_AUDIO === 'true') {
         console.warn('[session] VAD processor unavailable, skipping chunk');
       }
       return;
     }
-    this.vad = vad;
 
     try {
       let audioData =
@@ -101,7 +100,12 @@ export class SessionManager extends EventEmitter {
 
       this.currentSampleRate = this.targetSampleRate;
 
-      const vadResult = await vad.process(audioData);
+      const maxAmplitude =
+        typeof chunk.maxAmplitude === 'number'
+          ? chunk.maxAmplitude
+          : this.computeMaxAmplitude(audioData);
+
+      const vadResult = await vad.process(audioData, maxAmplitude);
 
       if (process.env.DEBUG_AUDIO === 'true') {
         console.log('[session] VAD result:', vadResult, 'buffer length:', this.speechBuffer.length);
@@ -109,44 +113,87 @@ export class SessionManager extends EventEmitter {
 
       if (vadResult.speech) {
         this.speechBuffer.push(audioData);
+
+        const totalBufferedSamples = this.getBufferedSampleCount();
+        const maxSamples = Math.floor(this.maxBufferedDurationSeconds * this.targetSampleRate);
+
+        if (totalBufferedSamples >= maxSamples && !this.isTranscribing) {
+          if (process.env.DEBUG_AUDIO === 'true') {
+            console.log('[session] Max buffered duration reached, forcing transcription');
+          }
+          await this.transcribeBufferedSpeech('max-buffer');
+        }
       }
 
       if (vadResult.pause && this.speechBuffer.length > 0 && !this.isTranscribing) {
-        this.isTranscribing = true;
-        const audioToTranscribe = this.combineBuffers(this.speechBuffer);
-        this.speechBuffer = [];
-
-        if (process.env.DEBUG_AUDIO === 'true') {
-          console.log('[session] VAD pause detected. Transcribing buffer:', {
-            samples: audioToTranscribe.length,
-            duration: audioToTranscribe.length / this.targetSampleRate,
-          });
-        }
-
-        const transcription = await this.engine.transcribe(audioToTranscribe, this.targetSampleRate);
-
-        if (process.env.DEBUG_AUDIO === 'true') {
-          console.log('[session] Transcription result:', transcription);
-        }
-
-        if (transcription && transcription.trim().length > 0 && transcription.toLowerCase().trim() !== '[blank_audio]') {
-          this.transcripts.push({
-            text: transcription.trim(),
-            timestamp: Date.now(),
-          });
-          this.sendTranscriptionsToUI();
-
-          const suggestions = await this.engine.generateSuggestions(transcription);
-          this.sendSuggestionsToUI(suggestions);
-        }
+        await this.transcribeBufferedSpeech('vad-pause');
       }
     } catch (error) {
       console.error('Session processing error:', error);
       this.emit('error', error);
-    } finally {
-      if (this.isTranscribing) {
-        this.isTranscribing = false;
+    }
+  }
+
+  private computeMaxAmplitude(buffer: Float32Array): number {
+    let max = 0;
+    for (let i = 0; i < buffer.length; i++) {
+      const value = Math.abs(buffer[i]);
+      if (value > max) {
+        max = value;
       }
+    }
+    return max;
+  }
+
+  private getBufferedSampleCount(): number {
+    return this.speechBuffer.reduce((sum, chunk) => sum + chunk.length, 0);
+  }
+
+  private async transcribeBufferedSpeech(reason: 'vad-pause' | 'max-buffer'): Promise<void> {
+    if (this.speechBuffer.length === 0 || this.isTranscribing) {
+      return;
+    }
+
+    this.isTranscribing = true;
+    const audioToTranscribe = this.combineBuffers(this.speechBuffer);
+    this.speechBuffer = [];
+
+    if (process.env.DEBUG_AUDIO === 'true') {
+      console.log(`[session] Transcribing buffer due to ${reason}:`, {
+        samples: audioToTranscribe.length,
+        duration: audioToTranscribe.length / this.targetSampleRate,
+      });
+    }
+
+    try {
+      const transcription = await this.engine.transcribe(
+        audioToTranscribe,
+        this.targetSampleRate
+      );
+
+      if (process.env.DEBUG_AUDIO === 'true') {
+        console.log('[session] Transcription result:', transcription);
+      }
+
+      if (
+        transcription &&
+        transcription.trim().length > 0 &&
+        transcription.toLowerCase().trim() !== '[blank_audio]'
+      ) {
+        this.transcripts.push({
+          text: transcription.trim(),
+          timestamp: Date.now(),
+        });
+        this.sendTranscriptionsToUI();
+
+        const suggestions = await this.engine.generateSuggestions(transcription);
+        this.sendSuggestionsToUI(suggestions);
+      }
+    } catch (error) {
+      console.error('[session] Transcription failed:', error);
+      throw error;
+    } finally {
+      this.isTranscribing = false;
     }
   }
 
@@ -165,7 +212,6 @@ export class SessionManager extends EventEmitter {
 
     // Start engine session
     await this.engine.startSession(config);
-    this.vad = this.engine.getVADProcessor();
     console.log('[session] Engine session started');
 
     // Signal renderer to start audio capture
