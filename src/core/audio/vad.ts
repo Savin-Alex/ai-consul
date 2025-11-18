@@ -3,10 +3,8 @@ import { DefaultVADProvider } from './vad-default';
 import { SileroVADProvider } from './vad-silero';
 import { VADProviderType } from '../config/transcription';
 
-export interface VADResult {
-  speech: boolean;
-  pause: boolean;
-}
+// Re-export VADResult for backward compatibility
+export type { VADResult };
 
 export class VADProcessor {
   private provider: VADProvider | null = null;

@@ -74,29 +74,36 @@ describe('SentenceAssembler', () => {
 
   describe('timeout boundary', () => {
     it('should emit sentence on timeout', async () => {
+      // Create assembler with shorter timeout for testing
+      const testAssembler = new SentenceAssembler({ maxSentenceDuration: 1000 });
       const sentences: CompleteSentence[] = [];
-      assembler.on('sentence', (sentence) => {
+      testAssembler.on('sentence', (sentence) => {
         sentences.push(sentence);
       });
 
+      // Set lastEmitTime to past to trigger timeout check
+      (testAssembler as any).lastEmitTime = Date.now() - 1500; // 1.5 seconds ago
+
+      const startTime = Date.now();
       const words: Word[] = [
-        { text: 'This', start: 0, end: 500, confidence: 0.9 },
-        { text: 'is', start: 500, end: 800, confidence: 0.9 },
-        { text: 'a', start: 800, end: 1000, confidence: 0.9 },
-        { text: 'long', start: 1000, end: 1500, confidence: 0.9 },
-        { text: 'sentence', start: 1500, end: 2000, confidence: 0.9 },
+        { text: 'This', start: startTime, end: startTime + 500, confidence: 0.9 },
+        { text: 'is', start: startTime + 500, end: startTime + 800, confidence: 0.9 },
+        { text: 'a', start: startTime + 800, end: startTime + 1000, confidence: 0.9 },
+        { text: 'long', start: startTime + 1000, end: startTime + 1500, confidence: 0.9 },
+        { text: 'sentence', start: startTime + 1500, end: startTime + 2000, confidence: 0.9 },
       ];
 
-      await assembler.addFinalTranscript('This is a long sentence', words);
+      // Adding words should trigger timeout check since lastEmitTime is in the past
+      await testAssembler.addFinalTranscript('This is a long sentence', words);
 
-      // Wait for timeout (maxSentenceDuration = 8000ms)
-      await new Promise(resolve => setTimeout(resolve, 8500));
+      // Wait a bit for async operations
+      await new Promise(resolve => setTimeout(resolve, 100));
 
       expect(sentences.length).toBeGreaterThan(0);
       if (sentences.length > 0) {
         expect(sentences[0].boundaryType).toBe('timeout');
       }
-    });
+    }, 3000); // Increase test timeout
   });
 
   describe('state management', () => {
@@ -119,4 +126,6 @@ describe('SentenceAssembler', () => {
     });
   });
 });
+
+
 

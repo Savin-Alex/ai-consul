@@ -29,17 +29,17 @@ export class SimulationMode {
   }
 
   async generateQuestion(context: string): Promise<string> {
-    const prompt = `You are an interviewer. Generate a professional interview question based on the conversation context:\n\n${context}\n\nGenerate a single interview question.`;
+    const prompt = `You are an interviewer. Generate a professional interview question based on the conversation context:\n\n${context}\n\nGenerate a single interview question. Return ONLY the question, no quotes, no explanation.`;
 
     const response = await this.llmRouter.generate(prompt);
 
-    // Parse response to extract question
-    const questionMatch = response.match(/["'](.+?)["']/);
-    if (questionMatch) {
-      return questionMatch[1];
-    }
+    // Clean up common prefixes and quotes
+    const cleaned = response
+      .replace(/^(Question:|Q:|Interviewer:)\s*/i, '')
+      .replace(/^["']|["']$/g, '')
+      .trim();
 
-    return response.trim();
+    return cleaned || 'Tell me about yourself.';
   }
 
   async generateFeedback(userAnswer: string, question: string): Promise<string> {
@@ -83,33 +83,74 @@ export class SimulationMode {
       .map((m, i) => `Metric ${i + 1}: WPM=${m.pacingWpm}, Fillers=${m.fillerWords}`)
       .join('\n');
 
-    const prompt = `Generate a session summary based on the following metrics:\n\n${metricsSummary}\n\nProvide:\n1. A 1-paragraph summary\n2. 3 specific strengths\n3. 3 actionable areas for improvement\n\nDo not use numeric scores. Format as JSON with keys: summary, strengths (array), improvements (array).`;
+    const prompt = this.promptBuilder.buildPrompt(
+      'simulation_summary',
+      metricsSummary,
+      ''
+    );
 
     try {
-      const response = await this.llmRouter.generate(prompt);
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return {
-          summary: parsed.summary || 'Session completed.',
-          strengths: parsed.strengths || [],
-          improvements: parsed.improvements || [],
-        };
-      }
+      const response = await this.llmRouter.generate(
+        prompt.userPrompt,
+        prompt.systemPrompt
+      );
+
+      // Use output validator for structured output
+      const validated = this.outputValidator.validate(
+        response,
+        'simulation_summary'
+      );
+
+      return {
+        summary: validated.summary || 'Session completed.',
+        strengths: validated.strengths || [],
+        improvements: validated.improvements || [],
+      };
     } catch (error) {
       console.error('Failed to generate session summary:', error);
+      
+      // Fallback
+      return {
+        summary: 'Session completed. Review the metrics to identify areas for improvement.',
+        strengths: ['Good engagement', 'Clear communication', 'Professional demeanor'],
+        improvements: ['Practice pacing', 'Reduce filler words', 'Increase energy'],
+      };
     }
-
-    // Fallback
-    return {
-      summary: 'Session completed. Review the metrics to identify areas for improvement.',
-      strengths: ['Good engagement', 'Clear communication', 'Professional demeanor'],
-      improvements: ['Practice pacing', 'Reduce filler words', 'Increase energy'],
-    };
   }
 
   clearMetrics(): void {
     this.metrics = [];
+  }
+
+  /**
+   * Get metrics trend analysis
+   */
+  getMetricsTrend(): { improving: boolean; details: string } {
+    if (this.metrics.length < 2) {
+      return { improving: true, details: 'Insufficient data for trend analysis' };
+    }
+
+    const recent = this.metrics.slice(-5);
+    const first = recent[0];
+    const last = recent[recent.length - 1];
+
+    const fillersTrend = (first.fillerWords || 0) - (last.fillerWords || 0);
+    const firstPacing = first.pacingWpm || 150;
+    const lastPacing = last.pacingWpm || 150;
+    const idealPacing = 150; // Target WPM
+    const pacingTrend = Math.abs(idealPacing - lastPacing) < Math.abs(idealPacing - firstPacing);
+
+    const improving = fillersTrend > 0 && pacingTrend;
+
+    const details = [
+      `Fillers: ${fillersTrend > 0 ? 'improving' : fillersTrend < 0 ? 'increasing' : 'stable'}`,
+      `Pacing: ${pacingTrend ? 'improving' : 'needs work'} (${Math.round(firstPacing)} → ${Math.round(lastPacing)} WPM)`,
+    ].join(', ');
+
+    return {
+      improving,
+      details,
+    };
   }
 }
 

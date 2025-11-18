@@ -2,43 +2,71 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { AudioCaptureManager } from '../capture';
 
 // Mock AudioContext and related APIs
-global.AudioContext = vi.fn().mockImplementation(() => ({
-  sampleRate: 48000,
-  audioWorklet: {
-    addModule: vi.fn().mockResolvedValue(undefined),
-  },
-  createMediaStreamSource: vi.fn().mockReturnValue({
-    connect: vi.fn(),
-  }),
-  createScriptProcessor: vi.fn().mockReturnValue({
-    connect: vi.fn(),
-    disconnect: vi.fn(),
-    onaudioprocess: null,
-  }),
-  close: vi.fn().mockResolvedValue(undefined),
-  destination: {},
-})) as any;
-
-global.AudioWorkletNode = vi.fn().mockImplementation(() => ({
-  port: {
-    onmessage: null,
-    close: vi.fn(),
-  },
-  disconnect: vi.fn(),
+const mockAddModule = vi.fn().mockResolvedValue(undefined);
+const mockCreateMediaStreamSource = vi.fn().mockReturnValue({
   connect: vi.fn(),
-})) as any;
+});
+const mockCreateScriptProcessor = vi.fn().mockReturnValue({
+  connect: vi.fn(),
+  disconnect: vi.fn(),
+  onaudioprocess: null,
+});
 
-global.MediaStream = vi.fn().mockImplementation(() => ({
-  getTracks: vi.fn().mockReturnValue([
+class MockAudioContext {
+  sampleRate = 48000;
+  audioWorklet = {
+    addModule: mockAddModule,
+  };
+  createMediaStreamSource = mockCreateMediaStreamSource;
+  createScriptProcessor = mockCreateScriptProcessor;
+  close = vi.fn().mockResolvedValue(undefined);
+  destination = {};
+}
+
+const mockAudioWorkletNodePort = {
+  onmessage: null,
+  close: vi.fn(),
+};
+const mockDisconnect = vi.fn();
+const mockConnect = vi.fn();
+
+class MockAudioWorkletNode {
+  port = mockAudioWorkletNodePort;
+  disconnect = mockDisconnect;
+  connect = mockConnect;
+  constructor(context: any, name: string) {
+    // Store constructor args for testing
+  }
+}
+
+global.AudioContext = MockAudioContext as any;
+global.AudioWorkletNode = MockAudioWorkletNode as any;
+
+// Create a proper MediaStream constructor
+class MockMediaStream {
+  getTracks = vi.fn().mockReturnValue([
     {
       stop: vi.fn(),
     },
-  ]),
-})) as any;
+  ]);
+}
 
-global.navigator = {
-  mediaDevices: {
-    getUserMedia: vi.fn().mockResolvedValue(new MediaStream()),
+global.MediaStream = MockMediaStream as any;
+
+Object.defineProperty(global, 'navigator', {
+  value: {
+    mediaDevices: {
+      getUserMedia: vi.fn().mockResolvedValue(new MockMediaStream()),
+    },
+  },
+  writable: true,
+  configurable: true,
+});
+
+// Mock window for AudioWorklet path resolution
+global.window = {
+  location: {
+    href: 'http://localhost:3000',
   },
 } as any;
 
@@ -48,27 +76,28 @@ describe('AudioCaptureManager', () => {
   beforeEach(() => {
     captureManager = new AudioCaptureManager();
     vi.clearAllMocks();
+    // Reset mocks
+    mockAddModule.mockResolvedValue(undefined);
+    mockCreateScriptProcessor.mockReturnValue({
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      onaudioprocess: null,
+    });
   });
 
   describe('AudioWorklet support', () => {
     it('should attempt to use AudioWorklet when available', async () => {
-      const audioContext = new AudioContext();
-      const mockStream = new MediaStream();
-
       await captureManager.startCapture({
         sources: ['microphone'],
         sampleRate: 16000,
         useAudioWorklet: true,
       });
 
-      expect(audioContext.audioWorklet?.addModule).toHaveBeenCalled();
+      expect(mockAddModule).toHaveBeenCalled();
     });
 
     it('should fallback to ScriptProcessorNode if AudioWorklet fails', async () => {
-      const audioContext = new AudioContext();
-      (audioContext.audioWorklet!.addModule as any).mockRejectedValueOnce(
-        new Error('AudioWorklet not supported')
-      );
+      mockAddModule.mockRejectedValueOnce(new Error('AudioWorklet not supported'));
 
       await captureManager.startCapture({
         sources: ['microphone'],
@@ -77,7 +106,7 @@ describe('AudioCaptureManager', () => {
       });
 
       // Should fallback to ScriptProcessorNode
-      expect(audioContext.createScriptProcessor).toHaveBeenCalled();
+      expect(mockCreateScriptProcessor).toHaveBeenCalled();
     });
 
     it('should emit audio chunks when using AudioWorklet', async () => {
@@ -110,16 +139,16 @@ describe('AudioCaptureManager', () => {
 
   describe('backward compatibility', () => {
     it('should use ScriptProcessorNode when AudioWorklet is disabled', async () => {
-      const audioContext = new AudioContext();
-
       await captureManager.startCapture({
         sources: ['microphone'],
         sampleRate: 16000,
         useAudioWorklet: false,
       });
 
-      expect(audioContext.createScriptProcessor).toHaveBeenCalled();
+      expect(mockCreateScriptProcessor).toHaveBeenCalled();
     });
   });
 });
+
+
 

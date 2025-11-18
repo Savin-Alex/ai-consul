@@ -4,6 +4,8 @@ import { BrowserWindow } from 'electron';
 import { VADProcessor } from './audio/vad';
 import { WhisperStreamingEngine, StreamingTranscript } from './audio/whisper-streaming';
 import { SentenceAssembler, CompleteSentence } from './audio/sentence-assembler';
+import { AssemblyAIStreaming } from './audio/assemblyai-streaming';
+import { DeepgramStreaming } from './audio/deepgram-streaming';
 
 interface TranscriptEntry {
   text: string;
@@ -36,6 +38,8 @@ export class SessionManager extends EventEmitter {
   private streamingMode: boolean = false;
   private streamingEngine: WhisperStreamingEngine | null = null;
   private sentenceAssembler: SentenceAssembler | null = null;
+  private cloudStreamingService: AssemblyAIStreaming | DeepgramStreaming | null = null;
+  private streamingServiceType: 'local' | 'assemblyai' | 'deepgram' | 'hybrid' = 'local';
 
   constructor(engine: AIConsulEngine) {
     super();
@@ -100,18 +104,40 @@ export class SessionManager extends EventEmitter {
   }
 
   private async processAudioChunkStreaming(chunk: AudioChunk): Promise<void> {
-    if (!this.streamingEngine) {
-      return;
-    }
-
     try {
       let audioData =
         chunk.sampleRate === this.targetSampleRate
           ? chunk.data
           : this.resampleBuffer(chunk.data, chunk.sampleRate, this.targetSampleRate);
 
-      // Send directly to streaming engine
-      await this.streamingEngine.addAudio(audioData, this.targetSampleRate);
+      // Route to appropriate streaming service
+      if (this.streamingServiceType === 'assemblyai' || this.streamingServiceType === 'deepgram') {
+        // Use cloud streaming service
+        if (this.cloudStreamingService) {
+          await this.cloudStreamingService.sendAudio(audioData);
+        } else {
+          console.warn('[session] Cloud streaming service not available, falling back to local');
+          if (this.streamingEngine) {
+            await this.streamingEngine.addAudio(audioData, this.targetSampleRate);
+          }
+        }
+      } else if (this.streamingServiceType === 'hybrid') {
+        // Send to both local and cloud (local for low latency, cloud for accuracy)
+        if (this.streamingEngine) {
+          await this.streamingEngine.addAudio(audioData, this.targetSampleRate);
+        }
+        if (this.cloudStreamingService) {
+          // Send to cloud asynchronously (don't wait)
+          this.cloudStreamingService.sendAudio(audioData).catch((error) => {
+            console.warn('[session] Cloud streaming send failed:', error);
+          });
+        }
+      } else {
+        // Local-only streaming
+        if (this.streamingEngine) {
+          await this.streamingEngine.addAudio(audioData, this.targetSampleRate);
+        }
+      }
     } catch (error) {
       console.error('[session] Streaming processing error:', error);
       this.emit('error', error);
@@ -278,48 +304,146 @@ export class SessionManager extends EventEmitter {
   private async initializeStreamingMode(): Promise<void> {
     try {
       const engineConfig = this.engine.getConfig();
+      const transcriptionConfig = this.engine.getTranscriptionConfig();
       const streamingConfig = engineConfig.models.transcription.streaming || {};
       
-      // Determine model size
-      let modelSize: 'tiny' | 'base' | 'small' = 'base';
-      if (engineConfig.models.transcription.primary.includes('small')) {
-        modelSize = 'small';
-      } else if (engineConfig.models.transcription.primary.includes('tiny')) {
-        modelSize = 'tiny';
+      // Determine streaming service type based on configuration
+      const failoverOrder = transcriptionConfig.failoverOrder || [];
+      
+      // Check if cloud streaming is preferred (check failoverOrder first)
+      if (failoverOrder[0] === 'cloud-assembly') {
+        this.streamingServiceType = 'assemblyai';
+      } else if (failoverOrder[0] === 'cloud-deepgram') {
+        this.streamingServiceType = 'deepgram';
+      } else if (transcriptionConfig.allowCloud && transcriptionConfig.allowLocal) {
+        // Check if cloud services are in failover order for hybrid mode
+        const hasCloudInOrder = failoverOrder.some(engine => 
+          engine === 'cloud-assembly' || engine === 'cloud-deepgram'
+        );
+        if (hasCloudInOrder) {
+          this.streamingServiceType = 'hybrid'; // Use local first, fallback to cloud
+        } else {
+          this.streamingServiceType = 'local';
+        }
+      } else {
+        this.streamingServiceType = 'local';
       }
 
-      // Create streaming engine
-      this.streamingEngine = new WhisperStreamingEngine({
-        windowSize: streamingConfig.windowSize || 2.0,
-        stepSize: streamingConfig.stepSize || 1.0,
-        overlapRatio: streamingConfig.overlapRatio || 0.5,
-        modelSize,
-      });
+      // Initialize cloud streaming service if needed
+      if (this.streamingServiceType === 'assemblyai' || this.streamingServiceType === 'hybrid') {
+        try {
+          this.cloudStreamingService = new AssemblyAIStreaming();
+          await this.cloudStreamingService.connect();
+          
+          // Setup event handlers
+          this.cloudStreamingService.on('interim', (transcript: StreamingTranscript) => {
+            this.handleInterimTranscript(transcript);
+          });
+          
+          this.cloudStreamingService.on('final', (transcript: StreamingTranscript) => {
+            this.handleFinalTranscript(transcript);
+          });
+          
+          this.cloudStreamingService.on('error', (error: Error) => {
+            console.error('[session] Cloud streaming error:', error);
+            // Fallback to local if in hybrid mode
+            if (this.streamingServiceType === 'hybrid' && this.streamingEngine) {
+              console.log('[session] Falling back to local streaming');
+              this.streamingServiceType = 'local';
+            } else {
+              this.emit('error', error);
+            }
+          });
+          
+          console.log('[session] AssemblyAI streaming initialized');
+        } catch (error) {
+          console.warn('[session] Failed to initialize AssemblyAI streaming:', error);
+          if (this.streamingServiceType === 'assemblyai') {
+            // If AssemblyAI was required, try Deepgram
+            this.streamingServiceType = 'deepgram';
+          } else {
+            // Fallback to local
+            this.streamingServiceType = 'local';
+          }
+        }
+      }
+      
+      if (this.streamingServiceType === 'deepgram' && !this.cloudStreamingService) {
+        try {
+          this.cloudStreamingService = new DeepgramStreaming();
+          await this.cloudStreamingService.connect();
+          
+          // Setup event handlers
+          this.cloudStreamingService.on('interim', (transcript: StreamingTranscript) => {
+            this.handleInterimTranscript(transcript);
+          });
+          
+          this.cloudStreamingService.on('final', (transcript: StreamingTranscript) => {
+            this.handleFinalTranscript(transcript);
+          });
+          
+          this.cloudStreamingService.on('error', (error: Error) => {
+            console.error('[session] Cloud streaming error:', error);
+            this.emit('error', error);
+          });
+          
+          console.log('[session] Deepgram streaming initialized');
+        } catch (error) {
+          console.warn('[session] Failed to initialize Deepgram streaming:', error);
+          // Fallback to local
+          this.streamingServiceType = 'local';
+        }
+      }
 
-      // Initialize streaming engine
-      await this.streamingEngine.initialize();
+      // Initialize local streaming engine (always for hybrid mode or as fallback)
+      if (this.streamingServiceType === 'local' || this.streamingServiceType === 'hybrid') {
+        // Determine model size
+        let modelSize: 'tiny' | 'base' | 'small' = 'base';
+        if (engineConfig.models.transcription.primary.includes('small')) {
+          modelSize = 'small';
+        } else if (engineConfig.models.transcription.primary.includes('tiny')) {
+          modelSize = 'tiny';
+        }
 
-      // Setup event handlers
-      this.streamingEngine.on('interim', (transcript: StreamingTranscript) => {
-        this.handleInterimTranscript(transcript);
-      });
+        // Create streaming engine
+        this.streamingEngine = new WhisperStreamingEngine({
+          windowSize: streamingConfig.windowSize || 2.0,
+          stepSize: streamingConfig.stepSize || 1.0,
+          overlapRatio: streamingConfig.overlapRatio || 0.5,
+          modelSize,
+        });
 
-      this.streamingEngine.on('final', (transcript: StreamingTranscript) => {
-        this.handleFinalTranscript(transcript);
-      });
+        // Initialize streaming engine
+        await this.streamingEngine.initialize();
 
-      this.streamingEngine.on('error', (error: Error) => {
-        console.error('[session] Streaming engine error:', error);
-        this.emit('error', error);
-      });
+        // Setup event handlers
+        this.streamingEngine.on('interim', (transcript: StreamingTranscript) => {
+          this.handleInterimTranscript(transcript);
+        });
 
-      // Create sentence assembler
+        this.streamingEngine.on('final', (transcript: StreamingTranscript) => {
+          this.handleFinalTranscript(transcript);
+        });
+
+        this.streamingEngine.on('error', (error: Error) => {
+          console.error('[session] Streaming engine error:', error);
+          // In hybrid mode, fallback to cloud
+          if (this.streamingServiceType === 'hybrid' && this.cloudStreamingService) {
+            console.log('[session] Falling back to cloud streaming');
+            this.streamingServiceType = this.cloudStreamingService instanceof AssemblyAIStreaming ? 'assemblyai' : 'deepgram';
+          } else {
+            this.emit('error', error);
+          }
+        });
+      }
+
+      // Create sentence assembler (used for all streaming modes)
       this.sentenceAssembler = new SentenceAssembler();
       this.sentenceAssembler.on('sentence', (sentence: CompleteSentence) => {
         this.handleCompleteSentence(sentence);
       });
 
-      console.log('[session] Streaming mode initialized');
+      console.log(`[session] Streaming mode initialized (type: ${this.streamingServiceType})`);
     } catch (error) {
       console.error('[session] Failed to initialize streaming mode, falling back to batch:', error);
       this.streamingMode = false;
@@ -405,6 +529,10 @@ export class SessionManager extends EventEmitter {
         await this.streamingEngine.flush();
         this.streamingEngine.reset();
       }
+      if (this.cloudStreamingService) {
+        await this.cloudStreamingService.disconnect();
+        this.cloudStreamingService = null;
+      }
       if (this.sentenceAssembler) {
         await this.sentenceAssembler.flush();
         this.sentenceAssembler.reset();
@@ -424,6 +552,8 @@ export class SessionManager extends EventEmitter {
     this.streamingMode = false;
     this.streamingEngine = null;
     this.sentenceAssembler = null;
+    this.cloudStreamingService = null;
+    this.streamingServiceType = 'local';
     this.sendSuggestionsToUI([]);
     this.transcripts = [];
     this.sendTranscriptionsToUI();

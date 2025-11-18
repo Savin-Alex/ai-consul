@@ -67,17 +67,23 @@ describe('SileroVADProvider', () => {
       await provider.process(new Float32Array(1600), 0.1);
 
       // Second chunk: silence (should trigger pause after duration)
-      mockPipeline.mockResolvedValueOnce([
+      // minSilenceDurationMs is typically 500ms, each chunk is ~100ms at 16kHz
+      // So we need at least 5-6 chunks of silence
+      mockPipeline.mockResolvedValue([
         { label: 'NO_SPEECH', score: 0.8 },
       ]);
 
-      // Process multiple silence chunks to exceed minSilenceDurationMs
-      for (let i = 0; i < 5; i++) {
-        await provider.process(new Float32Array(1600), 0.01);
+      // Process multiple silence chunks to exceed minSilenceDurationMs (500ms)
+      // Each chunk is ~100ms, so we need at least 6 chunks
+      let result;
+      for (let i = 0; i < 7; i++) {
+        result = await provider.process(new Float32Array(1600), 0.01);
+        if (result.pause) {
+          break; // Pause detected, stop processing
+        }
       }
 
-      const result = await provider.process(new Float32Array(1600), 0.01);
-      expect(result.pause).toBe(true);
+      expect(result!.pause).toBe(true);
     });
 
     it('should reset state correctly', () => {
@@ -87,4 +93,6 @@ describe('SileroVADProvider', () => {
     });
   });
 });
+
+
 

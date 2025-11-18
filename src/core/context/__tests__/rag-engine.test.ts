@@ -28,7 +28,7 @@ describe('RAGEngine', () => {
 
       await ragEngine.loadDocuments(['test.txt']);
 
-      const context = ragEngine.getRelevantContext('test');
+      const context = await ragEngine.getRelevantContext('test');
       expect(context).toContain('test content');
     });
 
@@ -41,7 +41,7 @@ describe('RAGEngine', () => {
 
       await ragEngine.loadDocuments(['test.pdf']);
 
-      const context = ragEngine.getRelevantContext('keywords');
+      const context = await ragEngine.getRelevantContext('keywords');
       expect(context).toContain('keywords');
     });
 
@@ -54,7 +54,7 @@ describe('RAGEngine', () => {
 
       await ragEngine.loadDocuments(['test.docx']);
 
-      const context = ragEngine.getRelevantContext('important');
+      const context = await ragEngine.getRelevantContext('important');
       expect(context).toContain('important information');
     });
 
@@ -68,7 +68,7 @@ describe('RAGEngine', () => {
 
       await ragEngine.loadDocuments(['doc1.txt', 'doc2.txt']);
 
-      const context = ragEngine.getRelevantContext('Document');
+      const context = await ragEngine.getRelevantContext('Document');
       expect(context).toContain('Document 1');
       expect(context).toContain('Document 2');
     });
@@ -81,7 +81,7 @@ describe('RAGEngine', () => {
 
       await ragEngine.loadDocuments(['test.txt']);
 
-      const context = ragEngine.getRelevantContext('AWS');
+      const context = await ragEngine.getRelevantContext('AWS');
       expect(context.length).toBeGreaterThan(0);
     });
 
@@ -91,7 +91,7 @@ describe('RAGEngine', () => {
 
       await ragEngine.loadDocuments(['test.txt']);
 
-      const context = ragEngine.getRelevantContext('nonexistentkeyword');
+      const context = await ragEngine.getRelevantContext('nonexistentkeyword');
       // Should return empty or very short context
       expect(context.length).toBeLessThanOrEqual(100);
     });
@@ -106,7 +106,7 @@ describe('RAGEngine', () => {
 
       await ragEngine.loadDocuments(['test.txt']);
 
-      const context = ragEngine.getRelevantContext('keyword', 3);
+      const context = await ragEngine.getRelevantContext('keyword', 3);
       const chunks = context.split('\n\n').filter((c) => c.trim());
       expect(chunks.length).toBeLessThanOrEqual(3);
     });
@@ -120,7 +120,7 @@ describe('RAGEngine', () => {
       await ragEngine.loadDocuments(['test.txt']);
       ragEngine.clear();
 
-      const context = ragEngine.getRelevantContext('Test');
+      const context = await ragEngine.getRelevantContext('Test');
       expect(context).toBe('');
     });
   });

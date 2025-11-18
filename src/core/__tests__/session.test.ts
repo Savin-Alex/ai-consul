@@ -11,6 +11,8 @@ describe('SessionManager', () => {
     generateSuggestions: ReturnType<typeof vi.fn>;
     stopSession: ReturnType<typeof vi.fn>;
     getVADProcessor: ReturnType<typeof vi.fn>;
+    getTranscriptionConfig: ReturnType<typeof vi.fn>;
+    getConfig: ReturnType<typeof vi.fn>;
   };
   let vadMock: {
     process: ReturnType<typeof vi.fn>;
@@ -37,6 +39,21 @@ describe('SessionManager', () => {
       generateSuggestions: vi.fn<[string], Promise<Suggestion[]>>(),
       stopSession: vi.fn(),
       getVADProcessor: vi.fn<[], VADProcessor | null>(),
+      getTranscriptionConfig: vi.fn().mockReturnValue({
+        mode: 'local-first',
+        allowLocal: true,
+        allowCloud: false,
+        privacyMode: true,
+      }),
+      getConfig: vi.fn().mockReturnValue({
+        models: {
+          transcription: {
+            mode: 'batch',
+            primary: 'local-whisper-tiny',
+            fallback: 'cloud-whisper',
+          },
+        },
+      }),
     };
 
     engineMock.transcribe.mockResolvedValue('');

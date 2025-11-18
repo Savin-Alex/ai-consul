@@ -1,5 +1,8 @@
+import { EventEmitter } from 'events';
 import { LocalWhisper } from './audio/whisper-local';
 import { CloudWhisper } from './audio/whisper-cloud';
+import { AssemblyAIStreaming } from './audio/assemblyai-streaming';
+import { DeepgramStreaming } from './audio/deepgram-streaming';
 import { LLMRouter } from './llm/router';
 import { ContextManager } from './context/manager';
 import { RAGEngine } from './context/rag-engine';
@@ -68,11 +71,13 @@ export interface Suggestion {
   useCase?: string;
 }
 
-export class AIConsulEngine {
+export class AIConsulEngine extends EventEmitter {
   private config: EngineConfig;
   private transcriptionConfig: TranscriptionPriorityConfig;
   private localWhisper: LocalWhisper | null = null;
   private cloudWhisper: CloudWhisper | null = null;
+  private assemblyAIStreaming: AssemblyAIStreaming | null = null;
+  private deepgramStreaming: DeepgramStreaming | null = null;
   private llmRouter: LLMRouter;
   private contextManager: ContextManager;
   private ragEngine: RAGEngine;
@@ -85,6 +90,7 @@ export class AIConsulEngine {
   private vadProcessor: VADProcessor | null = null;
 
   constructor(config: EngineConfig) {
+    super();
     this.config = config;
     this.transcriptionConfig = resolveTranscriptionConfig({
       mode: config.transcriptionPriority?.mode,
@@ -161,7 +167,8 @@ export class AIConsulEngine {
           const vadProvider = this.transcriptionConfig.vadProvider || 'default';
           this.vadProcessor = new VADProcessor(vadProvider);
           await this.vadProcessor.isReady();
-          console.log(`[engine] VAD initialized (provider: ${this.vadProcessor.getProviderName()})`);
+          const providerName = this.vadProcessor.getProviderName ? this.vadProcessor.getProviderName() : vadProvider;
+          console.log(`[engine] VAD initialized (provider: ${providerName})`);
         }
 
         this.isInitialized = true;
@@ -238,7 +245,7 @@ export class AIConsulEngine {
     const prompt = this.promptBuilder.buildPrompt(
       session.mode as any, // Type assertion for mode compatibility
       this.contextManager.getContext(),
-      this.ragEngine.getRelevantContext(transcription)
+      await this.ragEngine.getRelevantContext(transcription)
     );
 
     // Generate via LLM router
@@ -268,11 +275,77 @@ export class AIConsulEngine {
       case 'local-whisper':
         return this.getLocalWhisper().transcribe(audioChunk, sampleRate);
       case 'cloud-assembly':
+        return this.transcribeWithAssemblyAI(audioChunk, sampleRate);
       case 'cloud-deepgram':
-        return this.getCloudWhisper().transcribe(audioChunk);
+        return this.transcribeWithDeepgram(audioChunk, sampleRate);
       default:
-        throw new Error(`Transcription engine "${engineKey}" not implemented`);
+        // Fallback to OpenAI Whisper batch API
+        return this.getCloudWhisper().transcribe(audioChunk);
     }
+  }
+
+  private async transcribeWithAssemblyAI(
+    audioChunk: Float32Array,
+    sampleRate: number
+  ): Promise<string> {
+    if (!this.assemblyAIStreaming) {
+      try {
+        this.assemblyAIStreaming = new AssemblyAIStreaming();
+        await this.assemblyAIStreaming.connect();
+        
+        // Setup event handlers for streaming transcripts
+        this.assemblyAIStreaming.on('final', (transcript) => {
+          this.emit('streaming-transcript-final', transcript);
+        });
+        
+        this.assemblyAIStreaming.on('interim', (transcript) => {
+          this.emit('streaming-transcript-interim', transcript);
+        });
+      } catch (error) {
+        console.error('[engine] Failed to initialize AssemblyAI streaming:', error);
+        throw new Error(`AssemblyAI streaming not available: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    if (!this.assemblyAIStreaming.getIsConnected()) {
+      await this.assemblyAIStreaming.connect();
+    }
+
+    // For batch API compatibility, use transcribe method
+    // For true streaming, use sendAudio and handle events
+    return this.assemblyAIStreaming.transcribe(audioChunk, sampleRate);
+  }
+
+  private async transcribeWithDeepgram(
+    audioChunk: Float32Array,
+    sampleRate: number
+  ): Promise<string> {
+    if (!this.deepgramStreaming) {
+      try {
+        this.deepgramStreaming = new DeepgramStreaming();
+        await this.deepgramStreaming.connect();
+        
+        // Setup event handlers for streaming transcripts
+        this.deepgramStreaming.on('final', (transcript) => {
+          this.emit('streaming-transcript-final', transcript);
+        });
+        
+        this.deepgramStreaming.on('interim', (transcript) => {
+          this.emit('streaming-transcript-interim', transcript);
+        });
+      } catch (error) {
+        console.error('[engine] Failed to initialize Deepgram streaming:', error);
+        throw new Error(`Deepgram streaming not available: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    if (!this.deepgramStreaming.getIsConnected()) {
+      await this.deepgramStreaming.connect();
+    }
+
+    // For batch API compatibility, use transcribe method
+    // For true streaming, use sendAudio and handle events
+    return this.deepgramStreaming.transcribe(audioChunk, sampleRate);
   }
 
   private isEngineAllowed(engineKey: TranscriptionPriorityConfig['failoverOrder'][number]): boolean {
@@ -328,6 +401,32 @@ export class AIConsulEngine {
     }
     this.contextManager.clearExpiredData();
     this.secureDataFlow.cleanupSensitiveData();
+    
+    // Cleanup streaming connections
+    this.cleanupStreamingConnections();
+  }
+
+  /**
+   * Cleanup streaming connections
+   */
+  private async cleanupStreamingConnections(): Promise<void> {
+    if (this.assemblyAIStreaming) {
+      try {
+        await this.assemblyAIStreaming.disconnect();
+      } catch (error) {
+        console.error('[engine] Error disconnecting AssemblyAI:', error);
+      }
+      this.assemblyAIStreaming = null;
+    }
+    
+    if (this.deepgramStreaming) {
+      try {
+        await this.deepgramStreaming.disconnect();
+      } catch (error) {
+        console.error('[engine] Error disconnecting Deepgram:', error);
+      }
+      this.deepgramStreaming = null;
+    }
   }
 
   getCurrentSession(): SessionConfig | null {
