@@ -25,13 +25,28 @@ interface ValidatedOutput {
 }
 
 export class OutputValidator {
-  private library: PromptLibrary;
+  private library: PromptLibrary | null;
 
   constructor(library: any) {
-    this.library = library as PromptLibrary;
+    // Allow null initially - will be set during engine initialization
+    // Validation happens when validate is called
+    this.library = library as PromptLibrary | null;
+  }
+  
+  /**
+   * Set the prompt library (called during engine initialization)
+   */
+  setLibrary(library: PromptLibrary): void {
+    if (!library) {
+      throw new Error('Prompt library is required.');
+    }
+    this.library = library;
   }
 
   validate(llmResponse: string, mode: PromptMode): ValidatedOutput {
+    if (!this.library) {
+      throw new Error('Prompt library is not loaded. Ensure engine is initialized before using OutputValidator.');
+    }
     // Try to parse JSON from LLM response
     let parsed: any;
     try {

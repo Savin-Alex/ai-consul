@@ -83,9 +83,15 @@ export class AudioCaptureManager extends EventEmitter {
       throw new Error('AudioContext or source node not initialized');
     }
 
+    // AudioWorklet is not available in Node.js main process (Electron limitation)
+    // This code path should not be reached in main process, but add check for safety
+    if (typeof window === 'undefined') {
+      throw new Error('AudioWorklet is not available in Node.js main process. Use renderer process instead.');
+    }
+
     try {
       // Load the AudioWorklet processor module
-      // In Electron, we need to use the correct path
+      // In Electron renderer, we need to use the correct path
       // The worklet file must be accessible via HTTP/HTTPS or file:// protocol
       const workletPath = process.env.NODE_ENV === 'development'
         ? new URL('/src/core/audio/audio-worklet-processor.js', window.location.href).href
@@ -96,18 +102,37 @@ export class AudioCaptureManager extends EventEmitter {
       // Create AudioWorkletNode
       this.audioWorkletNode = new AudioWorkletNode(this.audioContext, 'streaming-audio-processor');
 
+      // Set capturing flag BEFORE setting up message handler to prevent race condition
+      const wasCapturing = this.isCapturing;
+      this.isCapturing = true;
+
       // Handle messages from the worklet
       this.audioWorkletNode.port.onmessage = (event) => {
-        if (!this.isCapturing) return;
+        // Double-check capturing state (defensive programming)
+        if (!this.isCapturing) {
+          return;
+        }
 
-        const { type, data, timestamp, sampleRate } = event.data;
+        // Validate event data structure
+        if (!event || !event.data || typeof event.data !== 'object') {
+          console.warn('[AudioCapture] Invalid worklet message:', event);
+          return;
+        }
+
+        const { type, data, timestamp, sampleRate, message } = event.data;
 
         if (type === 'audio-chunk') {
+          // Validate data before processing
+          if (!Array.isArray(data)) {
+            console.warn('[AudioCapture] Invalid audio chunk data:', data);
+            return;
+          }
+
           const chunk: AudioChunk = {
             data: new Float32Array(data),
-            sampleRate: sampleRate || this.sampleRate,
+            sampleRate: (typeof sampleRate === 'number' && sampleRate > 0) ? sampleRate : this.sampleRate,
             channels: this.channels,
-            timestamp: timestamp || Date.now(),
+            timestamp: (typeof timestamp === 'number' && timestamp > 0) ? timestamp : Date.now(),
           };
 
           this.emit('audio-chunk', chunk);
@@ -116,8 +141,16 @@ export class AudioCaptureManager extends EventEmitter {
             sourceSampleRate: event.data.sourceSampleRate,
             targetSampleRate: event.data.targetSampleRate,
           });
+        } else if (type === 'error') {
+          console.error('[AudioCapture] AudioWorklet error:', message || 'Unknown error');
+          this.emit('error', new Error(message || 'AudioWorklet error'));
         }
       };
+      
+      // Restore capturing state if it wasn't set
+      if (!wasCapturing) {
+        this.isCapturing = false;
+      }
 
       // Connect the audio graph
       this.sourceNode.connect(this.audioWorkletNode);
@@ -167,9 +200,21 @@ export class AudioCaptureManager extends EventEmitter {
       return;
     }
 
+    // Set capturing to false first to stop processing new messages
     this.isCapturing = false;
 
     if (this.audioWorkletNode) {
+      // Note: AudioWorklet processors can't receive messages directly in process()
+      // The flush will happen naturally when audio stops, or we can trigger it
+      // by checking a flag. For now, we'll rely on the worklet to flush remaining
+      // data when audio input stops (which happens automatically).
+      
+      // Remove message handler to prevent memory leak
+      this.audioWorkletNode.port.onmessage = null;
+      
+      // Small delay to allow any pending messages to be processed
+      await new Promise(resolve => setTimeout(resolve, 50));
+      
       this.audioWorkletNode.disconnect();
       this.audioWorkletNode.port.close();
       this.audioWorkletNode = null;

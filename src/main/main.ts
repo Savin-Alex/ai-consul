@@ -225,21 +225,35 @@ ipcMain.handle('start-session', async (_event, config) => {
 });
 
 ipcMain.handle('stop-session', async () => {
+  console.log('[main] stop-session IPC handler called');
   if (!sessionManager) {
+    console.error('[main] Session manager not initialized');
     return { success: false, error: 'Session manager not initialized' };
   }
   try {
-    await sessionManager.stop();
+    console.log('[main] Calling sessionManager.stop()');
+    // Add timeout to prevent hanging
+    const stopPromise = sessionManager.stop();
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('Stop session timed out after 5 seconds')), 5000);
+    });
+    
+    await Promise.race([stopPromise, timeoutPromise]);
+    console.log('[main] sessionManager.stop() completed');
+    
     // Send status update to renderer
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('session-status', { isActive: false });
     }
     return { success: true };
   } catch (error: any) {
+    console.error('[main] Error stopping session:', error);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('error', error.message || 'Failed to stop session');
+      mainWindow.webContents.send('session-status', { isActive: false });
     }
-    return { success: false };
+    // Still return success to allow UI to update
+    return { success: false, error: error.message };
   }
 });
 

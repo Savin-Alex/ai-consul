@@ -46,13 +46,23 @@ export class RAGEngine {
   }
 
   async loadDocuments(filePaths: string[]): Promise<void> {
+    const errors: Array<{ filePath: string; error: Error }> = [];
+    
     for (const filePath of filePaths) {
       try {
         const chunks = await this.loadDocument(filePath);
         this.documents.set(filePath, chunks);
       } catch (error) {
-        console.error(`Failed to load document ${filePath}:`, error);
+        const errorObj = error instanceof Error ? error : new Error(String(error));
+        console.error(`Failed to load document ${filePath}:`, errorObj);
+        errors.push({ filePath, error: errorObj });
       }
+    }
+    
+    // If any documents failed to load, throw aggregate error
+    if (errors.length > 0) {
+      const errorMessages = errors.map(e => `${e.filePath}: ${e.error.message}`).join('; ');
+      throw new Error(`Failed to load ${errors.length} document(s): ${errorMessages}`);
     }
   }
 

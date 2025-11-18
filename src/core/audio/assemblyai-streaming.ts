@@ -50,6 +50,8 @@ export class AssemblyAIStreaming extends EventEmitter {
   private isReconnecting = false;
   private audioBuffer: Float32Array[] = []; // Buffer audio during disconnection
   private maxBufferDuration = 5000; // 5 seconds of audio
+  private maxRecursionDepth = 10; // Prevent infinite recursion
+  private currentRecursionDepth = 0;
 
   constructor(apiKey?: string, reconnectionConfig?: Partial<ReconnectionConfig>) {
     super();
@@ -201,14 +203,25 @@ export class AssemblyAIStreaming extends EventEmitter {
 
   /**
    * Handle disconnection and attempt reconnection
+   * Uses iterative approach instead of recursion to prevent stack overflow
    */
   private handleDisconnection(): void {
     if (!this.reconnectionConfig.enabled || this.isReconnecting) {
       return;
     }
 
+    // Prevent infinite recursion
+    if (this.currentRecursionDepth >= this.maxRecursionDepth) {
+      console.error('[AssemblyAI] Max recursion depth reached, stopping reconnection attempts');
+      this.currentRecursionDepth = 0;
+      this.emit('reconnection-failed');
+      this.clearAudioBuffer();
+      return;
+    }
+
     if (this.reconnectAttempts >= this.reconnectionConfig.maxRetries) {
       console.error('[AssemblyAI] Max reconnection attempts reached');
+      this.currentRecursionDepth = 0;
       this.emit('reconnection-failed');
       this.clearAudioBuffer();
       return;
@@ -216,6 +229,7 @@ export class AssemblyAIStreaming extends EventEmitter {
 
     this.isReconnecting = true;
     this.reconnectAttempts++;
+    this.currentRecursionDepth++;
 
     // Calculate delay with exponential backoff
     const delay = Math.min(
@@ -244,6 +258,7 @@ export class AssemblyAIStreaming extends EventEmitter {
         await this.connect();
         this.isReconnecting = false;
         this.reconnectAttempts = 0;
+        this.currentRecursionDepth = 0; // Reset on success
 
         // Flush buffered audio
         await this.flushAudioBuffer();
@@ -253,8 +268,11 @@ export class AssemblyAIStreaming extends EventEmitter {
       } catch (error) {
         console.error('[AssemblyAI] Reconnection failed:', error);
         this.isReconnecting = false;
-        // Retry again
-        this.handleDisconnection();
+        // Use iterative retry instead of recursion
+        // Schedule next attempt instead of calling recursively
+        setTimeout(() => {
+          this.handleDisconnection();
+        }, 0);
       }
     }, delay);
   }

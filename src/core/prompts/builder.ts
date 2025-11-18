@@ -1,9 +1,5 @@
-// Load JSON at runtime using fs to avoid import path issues
-import * as fs from 'fs';
-import * as path from 'path';
-
-const promptLibraryPath = path.join(__dirname, '../../../ai_prompt_library_final_v2.1.json');
-const promptLibrary = JSON.parse(fs.readFileSync(promptLibraryPath, 'utf-8'));
+// Prompt library loading is now handled in engine.ts with proper validation
+// This file no longer loads the library directly
 
 type PromptMode = 'education' | 'work_meetings' | 'job_interviews' | 'chat_messaging' | 'simulation_coaching';
 
@@ -28,13 +24,25 @@ interface CachedPrompt {
 }
 
 export class PromptBuilder {
-  private library: PromptLibrary;
+  private library: PromptLibrary | null;
   private promptCache: Map<string, CachedPrompt> = new Map();
   private readonly CACHE_TTL_MS = 3600000; // 1 hour
   private readonly MAX_CACHE_SIZE = 100; // Maximum cached prompts
 
   constructor(library: any) {
-    this.library = library as PromptLibrary;
+    // Allow null initially - will be set during engine initialization
+    // Validation happens when buildPrompt is called
+    this.library = library as PromptLibrary | null;
+  }
+  
+  /**
+   * Set the prompt library (called during engine initialization)
+   */
+  setLibrary(library: PromptLibrary): void {
+    if (!library) {
+      throw new Error('Prompt library is required.');
+    }
+    this.library = library;
   }
 
   /**
@@ -98,6 +106,10 @@ export class PromptBuilder {
     ragContext: string,
     tone: 'formal' | 'friendly' | 'slang' = 'friendly'
   ): { systemPrompt: string; userPrompt: string } {
+    if (!this.library) {
+      throw new Error('Prompt library is not loaded. Ensure engine is initialized before using PromptBuilder.');
+    }
+    
     const coreMeta = this.library.core_meta_prompt;
     const modeConfig = this.library.prompt_modes[mode];
 
@@ -180,6 +192,10 @@ export class PromptBuilder {
   }
 
   getModeOutputSchema(mode: PromptMode): any {
+    if (!this.library) {
+      throw new Error('Prompt library is not loaded. Ensure engine is initialized before using PromptBuilder.');
+    }
+    
     const modeConfig = this.library.prompt_modes[mode];
     if (modeConfig?.output_schema) {
       return modeConfig.output_schema;

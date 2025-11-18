@@ -12,11 +12,62 @@ import { OutputValidator } from './prompts/validator';
 import { VADProcessor } from './audio/vad';
 import { resolveTranscriptionConfig, TranscriptionPriorityConfig } from './config/transcription';
 // Load JSON at runtime using fs to avoid import path issues
-import * as fs from 'fs';
+import * as fs from 'fs/promises';
 import * as path from 'path';
+import { existsSync } from 'fs';
 
-const promptLibraryPath = path.join(__dirname, '../../ai_prompt_library_final_v2.1.json');
-const promptLibrary = JSON.parse(fs.readFileSync(promptLibraryPath, 'utf-8'));
+let promptLibrary: any = null;
+let promptLibraryLoadPromise: Promise<any> | null = null;
+
+/**
+ * Load prompt library with validation and error handling
+ * Uses async file operations to avoid blocking event loop
+ */
+async function loadPromptLibrary(): Promise<any> {
+  if (promptLibrary) {
+    return promptLibrary;
+  }
+
+  if (promptLibraryLoadPromise) {
+    return promptLibraryLoadPromise;
+  }
+
+  promptLibraryLoadPromise = (async () => {
+    try {
+      // Resolve path safely
+      const promptLibraryPath = path.resolve(__dirname, '../../ai_prompt_library_final_v2.1.json');
+      
+      // Validate path is within expected directory (security check)
+      const expectedDir = path.resolve(__dirname, '../../');
+      const resolvedPath = path.resolve(promptLibraryPath);
+      if (!resolvedPath.startsWith(expectedDir)) {
+        throw new Error(`Invalid prompt library path: ${promptLibraryPath}`);
+      }
+
+      // Check if file exists
+      if (!existsSync(resolvedPath)) {
+        throw new Error(`Prompt library not found at ${resolvedPath}`);
+      }
+
+      // Read file asynchronously
+      const fileContent = await fs.readFile(resolvedPath, 'utf-8');
+      
+      // Parse JSON with error handling
+      try {
+        promptLibrary = JSON.parse(fileContent);
+        return promptLibrary;
+      } catch (parseError) {
+        throw new Error(`Failed to parse prompt library JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
+      }
+    } catch (error) {
+      promptLibraryLoadPromise = null; // Reset on error
+      console.error('Failed to load prompt library:', error);
+      throw error;
+    }
+  })();
+
+  return promptLibraryLoadPromise;
+}
 
 export interface EngineConfig {
   privacy: {
@@ -129,8 +180,10 @@ export class AIConsulEngine extends EventEmitter {
     });
     this.ragEngine = new RAGEngine();
     this.secureDataFlow = new SecureDataFlow(config.privacy);
-    this.promptBuilder = new PromptBuilder(promptLibrary);
-    this.outputValidator = new OutputValidator(promptLibrary);
+    // Prompt library will be loaded asynchronously during initialize()
+    // Initialize with null - library will be set in initialize()
+    this.promptBuilder = new PromptBuilder(null);
+    this.outputValidator = new OutputValidator(null);
   }
 
   async initialize(): Promise<void> {
@@ -145,6 +198,13 @@ export class AIConsulEngine extends EventEmitter {
     this.initializationPromise = (async () => {
       try {
         console.log('Starting engine initialization...');
+
+        // Load prompt library first (required for promptBuilder and outputValidator)
+        console.log('Loading prompt library...');
+        const library = await loadPromptLibrary();
+        this.promptBuilder.setLibrary(library);
+        this.outputValidator.setLibrary(library);
+        console.log('Prompt library loaded');
 
         console.log('Initializing RAG engine...');
         await this.ragEngine.initialize();
@@ -206,8 +266,23 @@ export class AIConsulEngine extends EventEmitter {
           }
           return '';
         }
-        if (result && typeof result === 'object') {
-          return result;
+        // If result is an object (shouldn't happen, but handle gracefully)
+        // Type assertion needed because transcribeWithEngine returns Promise<string>
+        // but some engines might return objects in error cases
+        const resultAsAny = result as any;
+        if (resultAsAny && typeof resultAsAny === 'object') {
+          console.warn(`[engine] Unexpected object result from ${engineKey}, attempting to extract text`);
+          // Try to extract text property if it exists
+          if ('text' in resultAsAny && typeof resultAsAny.text === 'string') {
+            return resultAsAny.text;
+          }
+          // If it's a StreamingTranscript-like object, extract text
+          if ('text' in resultAsAny) {
+            return String(resultAsAny.text);
+          }
+          // Last resort: stringify the object (shouldn't happen in normal flow)
+          console.error(`[engine] Cannot extract text from object result:`, resultAsAny);
+          continue; // Try next engine
         }
       } catch (error) {
         console.warn(`[engine] ${engineKey} transcription failed:`, error);
@@ -242,8 +317,25 @@ export class AIConsulEngine extends EventEmitter {
     });
 
     // Build prompt with mode awareness
+    // Validate mode is supported
+    const supportedModes: SessionConfig['mode'][] = [
+      'job_interviews',
+      'work_meetings',
+      'education',
+      'chat_messaging',
+      'simulation_coaching',
+    ];
+    
+    if (!supportedModes.includes(session.mode)) {
+      throw new Error(`Unsupported session mode: ${session.mode}`);
+    }
+    
+    // Type-safe mode conversion
+    const promptMode: 'education' | 'work_meetings' | 'job_interviews' | 'chat_messaging' | 'simulation_coaching' = 
+      session.mode as 'education' | 'work_meetings' | 'job_interviews' | 'chat_messaging' | 'simulation_coaching';
+    
     const prompt = this.promptBuilder.buildPrompt(
-      session.mode as any, // Type assertion for mode compatibility
+      promptMode,
       this.contextManager.getContext(),
       await this.ragEngine.getRelevantContext(transcription)
     );
@@ -257,7 +349,7 @@ export class AIConsulEngine extends EventEmitter {
     // Validate output
     const validated = this.outputValidator.validate(
       llmResponse,
-      session.mode as any // Type assertion for mode compatibility
+      promptMode
     );
 
     return validated.suggestions.map((text) => ({
