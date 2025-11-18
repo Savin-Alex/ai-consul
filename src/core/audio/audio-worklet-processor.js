@@ -17,13 +17,17 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
     
     this.ringBuffer = [];
     this.targetSampleRate = 16000;
-    this.chunkSize = 1600; // 100ms at 16kHz
+    // Increased chunk size to 4KB (4096 samples = 256ms at 16kHz) for better transcription compatibility
+    this.chunkSize = 4096; // ~256ms at 16kHz (4KB of Int16 data)
     this.samplesCollected = 0;
     this.sourceSampleRate = sampleRate;
     this.needsDownsampling = this.sourceSampleRate !== this.targetSampleRate;
     this.downsamplingBuffer = null;
     this.downsamplingBufferIndex = 0;
     this.flushRequested = false;
+    this.isStopped = false;
+    this.consecutiveEmptyInputs = 0;
+    this.MAX_EMPTY_INPUTS = 10; // Stop after 10 empty inputs (~23ms at 48kHz)
     
     // Validate sample rate
     if (!sampleRate || sampleRate <= 0 || !isFinite(sampleRate)) {
@@ -35,9 +39,7 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
       return;
     }
     
-    // Calculate chunk size based on target sample rate (100ms chunks)
-    this.chunkSize = Math.floor(this.targetSampleRate * 0.1);
-    
+    // Chunk size is already set to 4096 (4KB) above for better transcription compatibility
     // Validate chunk size
     if (this.chunkSize <= 0) {
       console.error('[AudioWorklet] Invalid chunk size:', this.chunkSize);
@@ -74,7 +76,8 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
   
 
   /**
-   * Downsample audio from source rate to target rate using linear interpolation
+   * Downsample audio from source rate to target rate with anti-aliasing
+   * Uses simple averaging filter to prevent aliasing artifacts
    */
   downsample(input, sourceRate, targetRate) {
     if (sourceRate === targetRate) {
@@ -84,37 +87,71 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
     const ratio = sourceRate / targetRate;
     const outputLength = Math.floor(input.length / ratio);
     const output = new Float32Array(outputLength);
-
+    
+    // Anti-aliasing: average samples instead of simple interpolation
+    // This prevents high frequencies from folding back into the spectrum
+    const filterSize = Math.ceil(ratio);
+    
     for (let i = 0; i < outputLength; i++) {
-      const sourceIndex = i * ratio;
-      const indexFloor = Math.floor(sourceIndex);
-      const indexCeil = Math.min(indexFloor + 1, input.length - 1);
-      const weight = sourceIndex - indexFloor;
-
-      output[i] = input[indexFloor] + (input[indexCeil] - input[indexFloor]) * weight;
+      const sourceStart = Math.floor(i * ratio);
+      const sourceEnd = Math.min(sourceStart + filterSize, input.length);
+      
+      // Average samples in the filter window to reduce aliasing
+      let sum = 0;
+      let count = 0;
+      for (let j = sourceStart; j < sourceEnd; j++) {
+        sum += input[j];
+        count++;
+      }
+      output[i] = count > 0 ? sum / count : 0;
     }
 
     return output;
   }
 
   process(inputs, outputs, parameters) {
+    // If stopped, don't process any more audio
+    if (this.isStopped) {
+      return false; // Terminate processor
+    }
+
     // Check for flush request (checked each process call)
     if (this.flushRequested) {
       this.flush();
       this.flushRequested = false;
+      this.isStopped = true; // Mark as stopped after flush
+      return false; // Terminate processor after flush
     }
     
     try {
       const input = inputs[0];
       
       if (!input || input.length === 0) {
-        return true; // Keep processor alive
+        // Track consecutive empty inputs to detect disconnection
+        this.consecutiveEmptyInputs++;
+        if (this.consecutiveEmptyInputs >= this.MAX_EMPTY_INPUTS) {
+          // Likely disconnected, flush and stop
+          this.flush();
+          this.isStopped = true;
+          return false;
+        }
+        return true; // Keep processor alive for now
       }
 
       const inputChannel = input[0];
       if (!inputChannel || inputChannel.length === 0) {
+        // Track consecutive empty inputs
+        this.consecutiveEmptyInputs++;
+        if (this.consecutiveEmptyInputs >= this.MAX_EMPTY_INPUTS) {
+          this.flush();
+          this.isStopped = true;
+          return false;
+        }
         return true;
       }
+
+      // Reset empty input counter when we receive valid audio
+      this.consecutiveEmptyInputs = 0;
 
       let processedAudio;
 
@@ -249,6 +286,7 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
 
   /**
    * Emit accumulated chunk to main thread
+   * Sends Float32Array data directly using Transferable objects to avoid GC pressure
    */
   emitChunk() {
     try {
@@ -264,13 +302,14 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
         offset += buffer.length;
       }
 
-      // Send to main thread
+      // Send to main thread using Transferable to avoid GC pressure
+      // Float32Array is sent directly (not converted to Int16) as VAD/transcription expect Float32
       this.port.postMessage({
         type: 'audio-chunk',
-        data: Array.from(chunk), // Convert to array for message passing
+        data: chunk, // Float32Array sent directly
         timestamp: currentTime,
         sampleRate: this.targetSampleRate,
-      });
+      }, [chunk.buffer]); // Transfer ownership to avoid copying
 
       // Reset buffer
       this.ringBuffer = [];
@@ -307,6 +346,8 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
    */
   flush() {
     try {
+      let hadData = false;
+      
       // Flush downsampling buffer if it has data
       if (this.needsDownsampling && this.downsamplingBuffer && this.downsamplingBufferIndex > 0) {
         const remainingSamples = this.downsamplingBuffer.subarray(0, this.downsamplingBufferIndex);
@@ -317,16 +358,21 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
         );
         this.addToRingBuffer(processedAudio);
         this.downsamplingBufferIndex = 0;
+        hadData = true;
       }
       
-      // Emit any remaining chunks
+      // Emit any remaining chunks (even if smaller than chunkSize)
       if (this.samplesCollected > 0) {
         this.emitChunk();
+        hadData = true;
       }
       
       // Notify main thread that flush is complete
       try {
-        this.port.postMessage({ type: 'flush-complete' });
+        this.port.postMessage({ 
+          type: 'flush-complete',
+          hadData: hadData 
+        });
       } catch (error) {
         // Ignore errors during flush notification
       }

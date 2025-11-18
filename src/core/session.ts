@@ -24,6 +24,7 @@ export interface AudioChunk {
 export class SessionManager extends EventEmitter {
   private engine: AIConsulEngine;
   private isActive = false;
+  private isStopping = false; // Flag to allow processing during flush phase
   private currentConfig: SessionConfig | null = null;
   private mainWindow: BrowserWindow | null = null;
   private companionWindow: BrowserWindow | null = null;
@@ -266,8 +267,8 @@ export class SessionManager extends EventEmitter {
   }
 
   private async processAudioChunkBatch(chunk: AudioChunk): Promise<void> {
-    // Early return if session is not active
-    if (!this.isActive) {
+    // Early return if session is not active and not stopping (allow processing during flush)
+    if (!this.isActive && !this.isStopping) {
       return;
     }
 
@@ -343,9 +344,17 @@ export class SessionManager extends EventEmitter {
           console.warn('[session] Buffer overflow detected, forcing immediate transcription');
           // Force transcription even if already transcribing to prevent memory issues
           if (this.isTranscribing) {
-            // If already transcribing, clear buffer to prevent further growth
-            this.speechBuffer = [];
-            console.warn('[session] Cleared speech buffer due to overflow');
+            // If already transcribing, remove oldest chunks to make room (preserve recent audio)
+            // Remove enough chunks to get back under maxSamples
+            const samplesToRemove = totalBufferedSamples - maxSamples;
+            let removedSamples = 0;
+            while (removedSamples < samplesToRemove && this.speechBuffer.length > 0) {
+              const removedChunk = this.speechBuffer.shift();
+              if (removedChunk) {
+                removedSamples += removedChunk.length;
+              }
+            }
+            console.warn('[session] Removed oldest chunks to prevent overflow, preserved recent audio');
           } else {
             // Clear timeout before transcription
             if (this.speechEndTimeout) {
@@ -853,8 +862,9 @@ export class SessionManager extends EventEmitter {
 
     console.log('[session] Stopping session...', { wasActive, hadConfig });
 
-    // Mark as inactive immediately to prevent new operations
-    this.isActive = false;
+    // Set stopping flag to allow processing during flush phase
+    // Keep isActive=true until after flush completes to allow final chunks
+    this.isStopping = true;
     
     // Reset transcription flag to allow cleanup
     this.isTranscribing = false;
@@ -981,7 +991,8 @@ export class SessionManager extends EventEmitter {
     this.sentenceAssembler = null;
     this.cloudStreamingService = null;
     this.streamingServiceType = 'local';
-    
+    this.isStopping = false; // Reset stopping flag
+
     try {
       this.sendSuggestionsToUI([]);
       this.transcripts = [];
@@ -989,7 +1000,11 @@ export class SessionManager extends EventEmitter {
     } catch (error) {
       console.warn('[session] Error sending final UI updates:', error);
     }
-    
+
+    // Mark as inactive AFTER all cleanup is complete
+    // This ensures final chunks can be processed during flush
+    this.isActive = false;
+
     console.log('[session] Session stopped successfully');
     this.emit('session-stopped');
   }

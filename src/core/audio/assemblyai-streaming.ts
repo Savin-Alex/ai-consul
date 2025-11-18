@@ -227,6 +227,12 @@ export class AssemblyAIStreaming extends EventEmitter {
       return;
     }
 
+    // Prevent overlapping reconnection attempts
+    if (this.reconnectTimer) {
+      console.warn('[AssemblyAI] Reconnection already in progress, skipping duplicate call');
+      return;
+    }
+
     this.isReconnecting = true;
     this.reconnectAttempts++;
     this.currentRecursionDepth++;
@@ -243,6 +249,9 @@ export class AssemblyAIStreaming extends EventEmitter {
     );
 
     this.reconnectTimer = setTimeout(async () => {
+      // Clear timer reference before attempting reconnection
+      this.reconnectTimer = null;
+      
       try {
         // Clean up old transcriber
         if (this.transcriber) {
@@ -268,11 +277,20 @@ export class AssemblyAIStreaming extends EventEmitter {
       } catch (error) {
         console.error('[AssemblyAI] Reconnection failed:', error);
         this.isReconnecting = false;
-        // Use iterative retry instead of recursion
-        // Schedule next attempt instead of calling recursively
-        setTimeout(() => {
-          this.handleDisconnection();
-        }, 0);
+        // Use iterative retry with proper timer management
+        if (this.currentRecursionDepth < this.maxRecursionDepth) {
+          // Schedule next attempt (iterative, not recursive)
+          setTimeout(() => { 
+            if (!this.isReconnecting && !this.reconnectTimer) {
+              this.handleDisconnection(); 
+            }
+          }, 0);
+        } else {
+          // Max depth reached, stop trying
+          this.currentRecursionDepth = 0;
+          this.emit('reconnection-failed');
+          this.clearAudioBuffer();
+        }
       }
     }, delay);
   }

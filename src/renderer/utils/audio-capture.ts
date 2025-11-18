@@ -158,14 +158,22 @@ export class AudioCaptureManager extends EventEmitter {
         const { type, data, timestamp, sampleRate, message } = event.data;
 
         if (type === 'audio-chunk') {
+          // Data is sent as Float32Array via Transferable (no conversion needed)
           // Validate data before processing
-          if (!Array.isArray(data)) {
-            console.warn('[audio-capture] Invalid audio chunk data:', data);
+          let audioData: Float32Array;
+          if (data instanceof Float32Array) {
+            // Direct Float32Array (Transferable)
+            audioData = data;
+          } else if (Array.isArray(data)) {
+            // Fallback: convert array to Float32Array (shouldn't happen with Transferable)
+            audioData = new Float32Array(data);
+          } else {
+            console.warn('[audio-capture] Invalid audio chunk data type:', typeof data);
             return;
           }
 
           const chunk: AudioChunk = {
-            data: new Float32Array(data), // Convert array back to Float32Array
+            data: audioData,
             sampleRate: (typeof sampleRate === 'number' && sampleRate > 0) ? sampleRate : this.sampleRate,
             channels: this.channels,
             timestamp: (typeof timestamp === 'number' && timestamp > 0) ? timestamp : Date.now(),
