@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint-and-type-check:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run lint
+      - run: pnpm run type-check
+
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run test
+
+  dependency-validation:
+    name: Dependency Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run analyze:deps -- --summary
+      - run: pnpm run validate:deps
+      - run: pnpm vitest run tests/deps/dependency-limits.test.ts
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm vitest run tests/integration/priority-modes.test.ts
+      - run: pnpm vitest run tests/resilience/network-memory.test.ts
+
+  build-variants:
+    name: Build Variants
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [local-only, balanced, full]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - name: Build ${{ matrix.variant }} variant
+        run: |
+          if [ "${{ matrix.variant }}" == "local-only" ]; then
+            pnpm run build:local-only
+          elif [ "${{ matrix.variant }}" == "balanced" ]; then
+            pnpm run build:balanced
+          else
+            pnpm run build:full
+          fi
+      - name: Verify build output
+        run: |
+          if [ -d "dist" ]; then
+            echo "Build output exists"
+            ls -lah dist/
+          else
+            echo "Build output not found"
+            exit 1
+          fi
+
+  package-size-check:
+    name: Package Size Check
+    runs-on: ubuntu-latest
+    needs: [build-variants]
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - name: Check package size
+        run: pnpm run test:package-size || echo "Package size check failed - review output above"
+

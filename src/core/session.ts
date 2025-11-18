@@ -2,6 +2,8 @@ import { EventEmitter } from 'events';
 import { AIConsulEngine, SessionConfig, Suggestion } from './engine';
 import { BrowserWindow } from 'electron';
 import { VADProcessor } from './audio/vad';
+import { WhisperStreamingEngine, StreamingTranscript } from './audio/whisper-streaming';
+import { SentenceAssembler, CompleteSentence } from './audio/sentence-assembler';
 
 interface TranscriptEntry {
   text: string;
@@ -29,6 +31,11 @@ export class SessionManager extends EventEmitter {
   private targetSampleRate = 16000;
   private readonly maxBufferedDurationSeconds = 5.5;
   private transcripts: TranscriptEntry[] = [];
+  
+  // Streaming mode components
+  private streamingMode: boolean = false;
+  private streamingEngine: WhisperStreamingEngine | null = null;
+  private sentenceAssembler: SentenceAssembler | null = null;
 
   constructor(engine: AIConsulEngine) {
     super();
@@ -84,6 +91,34 @@ export class SessionManager extends EventEmitter {
       return;
     }
 
+    // Route to streaming or batch mode
+    if (this.streamingMode && this.streamingEngine) {
+      await this.processAudioChunkStreaming(chunk);
+    } else {
+      await this.processAudioChunkBatch(chunk);
+    }
+  }
+
+  private async processAudioChunkStreaming(chunk: AudioChunk): Promise<void> {
+    if (!this.streamingEngine) {
+      return;
+    }
+
+    try {
+      let audioData =
+        chunk.sampleRate === this.targetSampleRate
+          ? chunk.data
+          : this.resampleBuffer(chunk.data, chunk.sampleRate, this.targetSampleRate);
+
+      // Send directly to streaming engine
+      await this.streamingEngine.addAudio(audioData, this.targetSampleRate);
+    } catch (error) {
+      console.error('[session] Streaming processing error:', error);
+      this.emit('error', error);
+    }
+  }
+
+  private async processAudioChunkBatch(chunk: AudioChunk): Promise<void> {
     const vad = this.engine.getVADProcessor();
     if (!vad) {
       if (process.env.DEBUG_AUDIO === 'true') {
@@ -210,6 +245,16 @@ export class SessionManager extends EventEmitter {
     this.speechBuffer = [];
     this.isTranscribing = false;
 
+    // Check if streaming mode is enabled
+    const engineConfig = this.engine.getTranscriptionConfig();
+    const transcriptionMode = this.engine.getConfig().models.transcription.mode || 'batch';
+    this.streamingMode = transcriptionMode === 'streaming' && engineConfig.allowLocal;
+
+    // Initialize streaming components if enabled
+    if (this.streamingMode) {
+      await this.initializeStreamingMode();
+    }
+
     // Start engine session
     await this.engine.startSession(config);
     console.log('[session] Engine session started');
@@ -220,13 +265,115 @@ export class SessionManager extends EventEmitter {
         sources: ['microphone'],
         sampleRate: 16000,
         channels: 1,
+        useAudioWorklet: true,
       });
       console.log('[session] Sent start-audio-capture signal to renderer');
     }
 
     this.isActive = true;
-    console.log('[session] Session marked as active');
+    console.log(`[session] Session marked as active (mode: ${this.streamingMode ? 'streaming' : 'batch'})`);
     this.emit('session-started', config);
+  }
+
+  private async initializeStreamingMode(): Promise<void> {
+    try {
+      const engineConfig = this.engine.getConfig();
+      const streamingConfig = engineConfig.models.transcription.streaming || {};
+      
+      // Determine model size
+      let modelSize: 'tiny' | 'base' | 'small' = 'base';
+      if (engineConfig.models.transcription.primary.includes('small')) {
+        modelSize = 'small';
+      } else if (engineConfig.models.transcription.primary.includes('tiny')) {
+        modelSize = 'tiny';
+      }
+
+      // Create streaming engine
+      this.streamingEngine = new WhisperStreamingEngine({
+        windowSize: streamingConfig.windowSize || 2.0,
+        stepSize: streamingConfig.stepSize || 1.0,
+        overlapRatio: streamingConfig.overlapRatio || 0.5,
+        modelSize,
+      });
+
+      // Initialize streaming engine
+      await this.streamingEngine.initialize();
+
+      // Setup event handlers
+      this.streamingEngine.on('interim', (transcript: StreamingTranscript) => {
+        this.handleInterimTranscript(transcript);
+      });
+
+      this.streamingEngine.on('final', (transcript: StreamingTranscript) => {
+        this.handleFinalTranscript(transcript);
+      });
+
+      this.streamingEngine.on('error', (error: Error) => {
+        console.error('[session] Streaming engine error:', error);
+        this.emit('error', error);
+      });
+
+      // Create sentence assembler
+      this.sentenceAssembler = new SentenceAssembler();
+      this.sentenceAssembler.on('sentence', (sentence: CompleteSentence) => {
+        this.handleCompleteSentence(sentence);
+      });
+
+      console.log('[session] Streaming mode initialized');
+    } catch (error) {
+      console.error('[session] Failed to initialize streaming mode, falling back to batch:', error);
+      this.streamingMode = false;
+      this.streamingEngine = null;
+      this.sentenceAssembler = null;
+    }
+  }
+
+  private handleInterimTranscript(transcript: StreamingTranscript): void {
+    // Send interim results to UI for real-time feedback
+    if (this.transcriptWindow && !this.transcriptWindow.isDestroyed()) {
+      this.transcriptWindow.webContents.send('interim-transcript', {
+        text: transcript.text,
+        timestamp: transcript.timestamp,
+      });
+    }
+
+    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+      this.mainWindow.webContents.send('interim-transcript', {
+        text: transcript.text,
+        timestamp: transcript.timestamp,
+      });
+    }
+  }
+
+  private handleFinalTranscript(transcript: StreamingTranscript): void {
+    // Send to sentence assembler
+    if (this.sentenceAssembler) {
+      this.sentenceAssembler.addFinalTranscript(transcript.text, transcript.words || []);
+    } else {
+      // Fallback: add directly to transcripts
+      this.transcripts.push({
+        text: transcript.text,
+        timestamp: transcript.timestamp,
+      });
+      this.sendTranscriptionsToUI();
+    }
+  }
+
+  private async handleCompleteSentence(sentence: CompleteSentence): Promise<void> {
+    // Add to transcripts
+    this.transcripts.push({
+      text: sentence.text,
+      timestamp: sentence.startTime,
+    });
+    this.sendTranscriptionsToUI();
+
+    // Generate suggestions
+    try {
+      const suggestions = await this.engine.generateSuggestions(sentence.text);
+      this.sendSuggestionsToUI(suggestions);
+    } catch (error) {
+      console.error('[session] Failed to generate suggestions:', error);
+    }
   }
 
   async pause(): Promise<void> {
@@ -252,6 +399,18 @@ export class SessionManager extends EventEmitter {
   async stop(): Promise<void> {
     if (!this.isActive && !this.currentConfig) return;
 
+    // Flush streaming components if active
+    if (this.streamingMode) {
+      if (this.streamingEngine) {
+        await this.streamingEngine.flush();
+        this.streamingEngine.reset();
+      }
+      if (this.sentenceAssembler) {
+        await this.sentenceAssembler.flush();
+        this.sentenceAssembler.reset();
+      }
+    }
+
     // Signal renderer to stop audio capture
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
       this.mainWindow.webContents.send('stop-audio-capture');
@@ -262,6 +421,9 @@ export class SessionManager extends EventEmitter {
     this.isActive = false;
     this.speechBuffer = [];
     this.isTranscribing = false;
+    this.streamingMode = false;
+    this.streamingEngine = null;
+    this.sentenceAssembler = null;
     this.sendSuggestionsToUI([]);
     this.transcripts = [];
     this.sendTranscriptionsToUI();

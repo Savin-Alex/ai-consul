@@ -136,6 +136,9 @@ ipcMain.handle('session-manager-ready', () => {
     if (engine === null) {
       console.log('Engine is also null, creating engine first...');
       try {
+        const enableStreaming = process.env.ENABLE_STREAMING === 'true';
+        const transcriptionMode = enableStreaming ? 'streaming' : 'batch';
+        
         engine = new AIConsulEngine({
           privacy: {
             offlineFirst: true,
@@ -151,6 +154,12 @@ ipcMain.handle('session-manager-ready', () => {
             transcription: {
               primary: 'local-whisper-base',
               fallback: 'cloud-whisper',
+              mode: transcriptionMode,
+              streaming: enableStreaming ? {
+                windowSize: parseFloat(process.env.STREAMING_WINDOW_SIZE || '2.0'),
+                stepSize: parseFloat(process.env.STREAMING_STEP_SIZE || '1.0'),
+                overlapRatio: parseFloat(process.env.STREAMING_OVERLAP_RATIO || '0.5'),
+              } : undefined,
             },
             llm: {
               primary: 'ollama://llama3:8b',
@@ -314,6 +323,10 @@ app.whenReady().then(async () => {
   console.log('Windows ready, proceeding with initialization');
 
   // Initialize AI engine object (not initialized yet, just created)
+  // Check if streaming mode is enabled via environment variable
+  const enableStreaming = process.env.ENABLE_STREAMING === 'true';
+  const transcriptionMode = enableStreaming ? 'streaming' : 'batch';
+  
   engine = new AIConsulEngine({
     privacy: {
       offlineFirst: true,
@@ -329,6 +342,12 @@ app.whenReady().then(async () => {
       transcription: {
         primary: 'local-whisper-base',
         fallback: 'cloud-whisper',
+        mode: transcriptionMode,
+        streaming: enableStreaming ? {
+          windowSize: parseFloat(process.env.STREAMING_WINDOW_SIZE || '2.0'),
+          stepSize: parseFloat(process.env.STREAMING_STEP_SIZE || '1.0'),
+          overlapRatio: parseFloat(process.env.STREAMING_OVERLAP_RATIO || '0.5'),
+        } : undefined,
       },
       llm: {
         primary: 'ollama://llama3:8b',

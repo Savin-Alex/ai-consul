@@ -1,21 +1,4 @@
-// Dynamic import for ES module support
-let pipeline: any;
-let env: any;
-
-async function loadTransformers() {
-  if (!pipeline || !env) {
-    // Use Function constructor to force true dynamic import (not transformed by TypeScript)
-    const importTransformers = new Function('specifier', 'return import(specifier)');
-    const transformers = await importTransformers('@xenova/transformers');
-    pipeline = transformers.pipeline;
-    env = transformers.env;
-    
-    // Disable local model files to use CDN
-    env.allowLocalModels = false;
-    env.allowRemoteModels = true;
-  }
-  return { pipeline, env };
-}
+import { loadTransformers } from './transformers';
 
 export class LocalWhisper {
   private model: any = null;

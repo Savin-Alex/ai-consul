@@ -7,6 +7,7 @@ import { SecureDataFlow } from './security/privacy';
 import { PromptBuilder } from './prompts/builder';
 import { OutputValidator } from './prompts/validator';
 import { VADProcessor } from './audio/vad';
+import { resolveTranscriptionConfig, TranscriptionPriorityConfig } from './config/transcription';
 // Load JSON at runtime using fs to avoid import path issues
 import * as fs from 'fs';
 import * as path from 'path';
@@ -29,12 +30,19 @@ export interface EngineConfig {
     transcription: {
       primary: 'local-whisper-tiny' | 'local-whisper-base' | 'local-whisper-small' | 'cloud-whisper';
       fallback: 'cloud-whisper';
+      mode?: 'batch' | 'streaming'; // Transcription mode
+      streaming?: {
+        windowSize?: number;
+        stepSize?: number;
+        overlapRatio?: number;
+      };
     };
     llm: {
       primary: string; // e.g., 'ollama://llama3:8b'
       fallbacks: string[]; // e.g., ['gpt-4o-mini', 'claude-3-haiku']
     };
   };
+  transcriptionPriority?: Partial<TranscriptionPriorityConfig>;
 }
 
 export interface SessionConfig {
@@ -62,8 +70,9 @@ export interface Suggestion {
 
 export class AIConsulEngine {
   private config: EngineConfig;
-  private localWhisper: LocalWhisper;
-  private cloudWhisper: CloudWhisper | null;
+  private transcriptionConfig: TranscriptionPriorityConfig;
+  private localWhisper: LocalWhisper | null = null;
+  private cloudWhisper: CloudWhisper | null = null;
   private llmRouter: LLMRouter;
   private contextManager: ContextManager;
   private ragEngine: RAGEngine;
@@ -77,14 +86,23 @@ export class AIConsulEngine {
 
   constructor(config: EngineConfig) {
     this.config = config;
-    this.localWhisper = new LocalWhisper();
-
-    const wantsCloudTranscription =
+    this.transcriptionConfig = resolveTranscriptionConfig({
+      mode: config.transcriptionPriority?.mode,
+      privacyMode: config.transcriptionPriority?.privacyMode ?? (config.privacy.offlineFirst && !config.privacy.cloudFallback),
+      allowCloud:
+        config.transcriptionPriority?.allowCloud ??
+        (config.privacy.cloudFallback || config.models.transcription.fallback === 'cloud-whisper'),
+      allowLocal: config.transcriptionPriority?.allowLocal ?? true,
+      localTimeoutMs: config.transcriptionPriority?.localTimeoutMs,
+      cloudTimeoutMs: config.transcriptionPriority?.cloudTimeoutMs,
+      costLimitUsd: config.transcriptionPriority?.costLimitUsd,
+      failoverOrder: config.transcriptionPriority?.failoverOrder,
+    });
+    const wantsCloud =
       config.models.transcription.primary === 'cloud-whisper' ||
-      config.models.transcription.fallback === 'cloud-whisper';
-    const allowCloudFallback = config.privacy.cloudFallback || wantsCloudTranscription;
-
-    if (allowCloudFallback) {
+      config.models.transcription.fallback === 'cloud-whisper' ||
+      this.transcriptionConfig.allowCloud;
+    if (wantsCloud && this.transcriptionConfig.allowCloud) {
       try {
         this.cloudWhisper = new CloudWhisper();
       } catch (error) {
@@ -94,8 +112,6 @@ export class AIConsulEngine {
         );
         this.cloudWhisper = null;
       }
-    } else {
-      this.cloudWhisper = null;
     }
     this.llmRouter = new LLMRouter(config);
     this.contextManager = new ContextManager({
@@ -128,9 +144,7 @@ export class AIConsulEngine {
         await this.ragEngine.initialize();
         console.log('RAG engine initialized');
 
-        if (
-          this.config.models.transcription.primary.startsWith('local-whisper')
-        ) {
+    if (this.transcriptionConfig.allowLocal) {
           let modelSize: 'tiny' | 'base' | 'small' = 'tiny';
           if (this.config.models.transcription.primary.includes('small')) {
             modelSize = 'small';
@@ -138,15 +152,16 @@ export class AIConsulEngine {
             modelSize = 'base';
           }
           console.log(`Initializing Whisper model (model size: ${modelSize})...`);
-          await this.localWhisper.initialize(modelSize);
+      await this.getLocalWhisper().initialize(modelSize);
           console.log('Whisper model initialized');
         }
 
         if (!this.vadProcessor) {
           console.log('[engine] Initializing VAD...');
-          this.vadProcessor = new VADProcessor();
+          const vadProvider = this.transcriptionConfig.vadProvider || 'default';
+          this.vadProcessor = new VADProcessor(vadProvider);
           await this.vadProcessor.isReady();
-          console.log('[engine] VAD initialized');
+          console.log(`[engine] VAD initialized (provider: ${this.vadProcessor.getProviderName()})`);
         }
 
         this.isInitialized = true;
@@ -167,43 +182,41 @@ export class AIConsulEngine {
   }
 
   async transcribe(audioChunk: Float32Array<ArrayBufferLike>, sampleRate: number = 16000): Promise<string> {
-    try {
-      // Try primary transcription method
-      if (
-        this.config.models.transcription.primary.startsWith('local-whisper')
-      ) {
-        try {
-          const transcript = await this.localWhisper.transcribe(audioChunk, sampleRate);
-          if (transcript && transcript.trim().length > 0) {
-            return transcript;
+    let lastError: Error | null = null;
+    for (const engineKey of this.transcriptionConfig.failoverOrder) {
+      if (!this.isEngineAllowed(engineKey)) {
+        continue;
+      }
+      try {
+        const timeout = this.getTimeoutForEngine(engineKey);
+        const result = await this.withTimeout(
+          this.transcribeWithEngine(engineKey, audioChunk, sampleRate),
+          timeout,
+        );
+        if (typeof result === 'string') {
+          if (result.trim().length > 0) {
+            return result;
           }
           return '';
-        } catch (error) {
-          console.warn('Local Whisper transcription failed, attempting fallback if available.', error);
         }
-      } else if (
-        this.config.models.transcription.primary === 'cloud-whisper'
-      ) {
-        if (!this.cloudWhisper) {
-          throw new Error('Cloud transcription is unavailable: missing API key');
+        if (result && typeof result === 'object') {
+          return result;
         }
-        return await this.cloudWhisper.transcribe(audioChunk);
+      } catch (error) {
+        console.warn(`[engine] ${engineKey} transcription failed:`, error);
+        if (error instanceof Error) {
+          lastError = error;
+        } else {
+          lastError = new Error(String(error));
+        }
       }
-
-      // Fallback to cloud if enabled
-      if (
-        this.config.models.transcription.fallback === 'cloud-whisper' &&
-        this.config.privacy.cloudFallback &&
-        this.cloudWhisper
-      ) {
-        return await this.cloudWhisper.transcribe(audioChunk);
-      }
-
-      return '';
-    } catch (error) {
-      console.error('Transcription error:', error);
-      throw error;
     }
+
+    if (lastError) {
+      throw lastError;
+    }
+
+    throw new Error('All transcription engines failed or are unavailable');
   }
 
   async generateSuggestions(transcription: string): Promise<Suggestion[]> {
@@ -246,6 +259,56 @@ export class AIConsulEngine {
     }));
   }
 
+  private async transcribeWithEngine(
+    engineKey: TranscriptionPriorityConfig['failoverOrder'][number],
+    audioChunk: Float32Array<ArrayBufferLike>,
+    sampleRate: number,
+  ): Promise<string> {
+    switch (engineKey) {
+      case 'local-whisper':
+        return this.getLocalWhisper().transcribe(audioChunk, sampleRate);
+      case 'cloud-assembly':
+      case 'cloud-deepgram':
+        return this.getCloudWhisper().transcribe(audioChunk);
+      default:
+        throw new Error(`Transcription engine "${engineKey}" not implemented`);
+    }
+  }
+
+  private isEngineAllowed(engineKey: TranscriptionPriorityConfig['failoverOrder'][number]): boolean {
+    if (!this.transcriptionConfig.allowCloud && engineKey.startsWith('cloud')) {
+      return false;
+    }
+    if (!this.transcriptionConfig.allowLocal && engineKey.startsWith('local')) {
+      return false;
+    }
+    if ((engineKey === 'cloud-assembly' || engineKey === 'cloud-deepgram') && !this.transcriptionConfig.allowCloud) {
+      return false;
+    }
+    if (engineKey === 'cloud-assembly' || engineKey === 'cloud-deepgram') {
+      return true;
+    }
+    if (engineKey === 'local-onnx') {
+      return false; // Placeholder until ONNX pipeline is implemented
+    }
+    return true;
+  }
+
+  private getTimeoutForEngine(engineKey: TranscriptionPriorityConfig['failoverOrder'][number]): number {
+    const isCloud = engineKey.startsWith('cloud');
+    return isCloud ? this.transcriptionConfig.cloudTimeoutMs : this.transcriptionConfig.localTimeoutMs;
+  }
+
+  private async withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+    if (timeoutMs <= 0 || Number.isNaN(timeoutMs)) {
+      return promise;
+    }
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms`)), timeoutMs),
+    );
+    return Promise.race([promise, timeoutPromise]);
+  }
+
   async startSession(config: SessionConfig): Promise<void> {
     this.currentSession = config;
 
@@ -269,6 +332,28 @@ export class AIConsulEngine {
 
   getCurrentSession(): SessionConfig | null {
     return this.currentSession;
+  }
+
+  getTranscriptionConfig(): TranscriptionPriorityConfig {
+    return this.transcriptionConfig;
+  }
+
+  getConfig(): EngineConfig {
+    return this.config;
+  }
+
+  private getLocalWhisper(): LocalWhisper {
+    if (!this.localWhisper) {
+      this.localWhisper = new LocalWhisper();
+    }
+    return this.localWhisper;
+  }
+
+  private getCloudWhisper(): CloudWhisper {
+    if (!this.cloudWhisper) {
+      this.cloudWhisper = new CloudWhisper();
+    }
+    return this.cloudWhisper;
   }
 }
 

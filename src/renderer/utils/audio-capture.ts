@@ -41,6 +41,8 @@ export class AudioCaptureManager extends EventEmitter {
   private audioContext: AudioContext | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private processorNode: ScriptProcessorNode | null = null;
+  private audioWorkletNode: AudioWorkletNode | null = null;
+  private useAudioWorklet: boolean = true;
   private isCapturing = false;
   private sampleRate = 16000;
   private channels = 1;
@@ -51,6 +53,7 @@ export class AudioCaptureManager extends EventEmitter {
     sampleRate?: number;
     channels?: number;
     deviceId?: string;
+    useAudioWorklet?: boolean;
   } = {}): Promise<void> {
     if (this.isCapturing) {
       return;
@@ -60,6 +63,7 @@ export class AudioCaptureManager extends EventEmitter {
     this.sampleRate = options.sampleRate || 16000;
     this.channels = options.channels || 1;
     this.deviceId = options.deviceId || undefined;
+    this.useAudioWorklet = options.useAudioWorklet !== false; // Default to true
 
     try {
       // For microphone, use getUserMedia
@@ -79,7 +83,7 @@ export class AudioCaptureManager extends EventEmitter {
           audio: audioConstraints,
         });
 
-        this.setupAudioProcessing(stream);
+        await this.setupAudioProcessing(stream);
       }
 
       // For system audio, we need to use desktopCapturer (handled in main process)
@@ -92,7 +96,7 @@ export class AudioCaptureManager extends EventEmitter {
     }
   }
 
-  private setupAudioProcessing(stream: MediaStream): void {
+  private async setupAudioProcessing(stream: MediaStream): Promise<void> {
     this.mediaStream = stream;
     this.audioContext = new AudioContext({ sampleRate: this.sampleRate });
     // Update actual sample rate in case the browser chooses a different value
@@ -101,8 +105,78 @@ export class AudioCaptureManager extends EventEmitter {
     }
     this.sourceNode = this.audioContext.createMediaStreamSource(stream);
 
+    // Try AudioWorklet first, fallback to ScriptProcessorNode
+    if (this.useAudioWorklet && this.audioContext.audioWorklet) {
+      try {
+        await this.setupAudioWorklet();
+        return;
+      } catch (error) {
+        console.warn('[audio-capture] AudioWorklet setup failed, falling back to ScriptProcessorNode:', error);
+        this.useAudioWorklet = false;
+      }
+    }
+
+    // Fallback to ScriptProcessorNode (deprecated but works)
+    this.setupScriptProcessor();
+  }
+
+  private async setupAudioWorklet(): Promise<void> {
+    if (!this.audioContext || !this.sourceNode) {
+      throw new Error('AudioContext or source node not initialized');
+    }
+
+    try {
+      // Load the AudioWorklet processor module
+      // In development, Vite serves files from src/
+      // In production, files are in dist/
+      const isDev = import.meta.env.DEV;
+      const workletPath = isDev
+        ? new URL('/src/core/audio/audio-worklet-processor.js', window.location.href).href
+        : new URL('/dist/core/audio/audio-worklet-processor.js', window.location.href).href;
+
+      await this.audioContext.audioWorklet.addModule(workletPath);
+
+      // Create AudioWorkletNode
+      this.audioWorkletNode = new AudioWorkletNode(this.audioContext, 'streaming-audio-processor');
+
+      // Handle messages from the worklet
+      this.audioWorkletNode.port.onmessage = (event) => {
+        if (!this.isCapturing) return;
+
+        const { type, data, timestamp, sampleRate } = event.data;
+
+        if (type === 'audio-chunk') {
+          const chunk: AudioChunk = {
+            data: new Float32Array(data), // Convert array back to Float32Array
+            sampleRate: sampleRate || this.sampleRate,
+            channels: this.channels,
+            timestamp: timestamp || Date.now(),
+          };
+
+          this.emit('audio-chunk', chunk);
+        } else if (type === 'processor-ready') {
+          console.log('[audio-capture] AudioWorklet processor ready', {
+            sourceSampleRate: event.data.sourceSampleRate,
+            targetSampleRate: event.data.targetSampleRate,
+          });
+        }
+      };
+
+      // Connect the audio graph
+      this.sourceNode.connect(this.audioWorkletNode);
+      // Note: AudioWorkletNode doesn't need to connect to destination
+    } catch (error) {
+      console.error('[audio-capture] Failed to setup AudioWorklet:', error);
+      throw error;
+    }
+  }
+
+  private setupScriptProcessor(): void {
+    if (!this.audioContext || !this.sourceNode) {
+      throw new Error('AudioContext or source node not initialized');
+    }
+
     // Create script processor for chunking (deprecated but works)
-    // In production, use AudioWorklet for better performance
     const bufferSize = 4096;
     this.processorNode = this.audioContext.createScriptProcessor(
       bufferSize,
@@ -118,21 +192,9 @@ export class AudioCaptureManager extends EventEmitter {
       const float32Array = new Float32Array(channelData.length);
       float32Array.set(channelData);
 
-      // Debug logging for audio processing
-      const maxAmplitude = Math.max(...Array.from(float32Array));
-      const avgAmplitude = float32Array.reduce((sum, val) => sum + Math.abs(val), 0) / float32Array.length;
-
-      console.log('[audio-capture] onaudioprocess fired:', {
-        bufferLength: float32Array.length,
-        maxAmplitude: maxAmplitude,
-        avgAmplitude: avgAmplitude,
-        sampleRate: this.audioContext.sampleRate,
-        isCapturing: this.isCapturing
-      });
-
       const chunk: AudioChunk = {
         data: float32Array,
-        sampleRate: this.audioContext.sampleRate,
+        sampleRate: this.audioContext!.sampleRate,
         channels: this.channels,
         timestamp: Date.now(),
       };
@@ -150,6 +212,12 @@ export class AudioCaptureManager extends EventEmitter {
     }
 
     this.isCapturing = false;
+
+    if (this.audioWorkletNode) {
+      this.audioWorkletNode.disconnect();
+      this.audioWorkletNode.port.close();
+      this.audioWorkletNode = null;
+    }
 
     if (this.processorNode) {
       this.processorNode.disconnect();
