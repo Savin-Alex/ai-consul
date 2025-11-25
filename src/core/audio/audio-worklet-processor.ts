@@ -32,6 +32,7 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
   private isStopped: boolean = false;
   private consecutiveEmptyInputs: number = 0;
   private readonly MAX_EMPTY_INPUTS = 10; // Stop after 10 empty inputs (~23ms at 48kHz)
+  private portClosed: boolean = false; // Track port state to handle closure gracefully
 
   constructor(options?: AudioWorkletNodeOptions) {
     super();
@@ -122,8 +123,8 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
     outputs: Float32Array[][],
     parameters: Record<string, Float32Array>
   ): boolean {
-    // If stopped, don't process any more audio
-    if (this.isStopped) {
+    // If stopped or port closed, don't process any more audio
+    if (this.isStopped || this.portClosed) {
       return false; // Terminate processor
     }
 
@@ -302,8 +303,8 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
    */
   private emitChunk(): void {
     try {
-      if (this.samplesCollected === 0 || this.ringBuffer.length === 0) {
-        return; // Nothing to emit
+      if (this.samplesCollected === 0 || this.ringBuffer.length === 0 || this.portClosed) {
+        return; // Nothing to emit or port is closed
       }
       
       // Combine buffered samples
@@ -314,14 +315,29 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
         offset += buffer.length;
       }
 
-      // Send to main thread using Transferable to avoid GC pressure
-      // Float32Array is sent directly (not converted to Int16) as VAD/transcription expect Float32
-      this.port.postMessage({
-        type: 'audio-chunk',
-        data: chunk, // Float32Array sent directly
-        timestamp: currentTime,
-        sampleRate: this.targetSampleRate,
-      }, [chunk.buffer] as Transferable[]); // Transfer ownership to avoid copying
+      // CRITICAL: Check port state before sending
+      try {
+        // Send to main thread using Transferable to avoid GC pressure
+        // Float32Array is sent directly (not converted to Int16) as VAD/transcription expect Float32
+        this.port.postMessage({
+          type: 'audio-chunk',
+          data: chunk, // Float32Array sent directly
+          timestamp: currentTime,
+          sampleRate: this.targetSampleRate,
+        }, [chunk.buffer] as Transferable[]); // Transfer ownership to avoid copying
+      } catch (error) {
+        // Port may be closed - mark as closed and stop processing
+        if (error instanceof DOMException && error.name === 'InvalidStateError') {
+          console.warn('[AudioWorklet] Port closed, stopping processor');
+          this.portClosed = true;
+          this.isStopped = true;
+          // Reset buffer to prevent memory leak
+          this.ringBuffer = [];
+          this.samplesCollected = 0;
+          return;
+        }
+        throw error; // Re-throw other errors
+      }
 
       // Reset buffer
       this.ringBuffer = [];
@@ -330,14 +346,27 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error('[AudioWorklet] Error emitting chunk:', error);
       
-      // Notify main thread of error
-      try {
-        this.port.postMessage({
-          type: 'error',
-          message: `Emit chunk error: ${errorMessage}`,
-        });
-      } catch (postError) {
-        console.error('[AudioWorklet] Failed to send error message:', postError);
+      // CRITICAL: Mark port as closed if postMessage fails with InvalidStateError
+      if (error instanceof DOMException && error.name === 'InvalidStateError') {
+        this.portClosed = true;
+        this.isStopped = true;
+      }
+      
+      // Notify main thread of error (if port is still open)
+      if (!this.portClosed) {
+        try {
+          this.port.postMessage({
+            type: 'error',
+            message: `Emit chunk error: ${errorMessage}`,
+          });
+        } catch (postError) {
+          // Port closed during error notification
+          if (postError instanceof DOMException && postError.name === 'InvalidStateError') {
+            this.portClosed = true;
+            this.isStopped = true;
+          }
+          console.error('[AudioWorklet] Failed to send error message:', postError);
+        }
       }
       
       // Reset buffer even on error to prevent memory leak

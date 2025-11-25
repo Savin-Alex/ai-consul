@@ -121,16 +121,18 @@ describe('AudioCaptureManager', () => {
         useAudioWorklet: true,
       });
 
-      // Simulate AudioWorklet message
-      const audioWorkletNode = new AudioWorkletNode(new AudioContext(), 'test');
-      audioWorkletNode.port.onmessage?.({
-        data: {
-          type: 'audio-chunk',
-          data: new Float32Array([0.1, 0.2, 0.3]),
-          timestamp: Date.now(),
-          sampleRate: 16000,
-        },
-      } as any);
+      // Simulate AudioWorklet message by triggering the handler that was set on the mock port
+      // The capture manager sets onmessage on mockAudioWorkletNodePort during setupAudioWorklet
+      if (mockAudioWorkletNodePort.onmessage) {
+        mockAudioWorkletNodePort.onmessage({
+          data: {
+            type: 'audio-chunk',
+            data: new Float32Array([0.1, 0.2, 0.3]),
+            timestamp: Date.now(),
+            sampleRate: 16000,
+          },
+        } as any);
+      }
 
       expect(chunks.length).toBeGreaterThan(0);
       expect(chunks[0].sampleRate).toBe(16000);

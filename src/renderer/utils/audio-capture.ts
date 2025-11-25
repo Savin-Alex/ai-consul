@@ -186,8 +186,13 @@ export class AudioCaptureManager extends EventEmitter {
             targetSampleRate: event.data.targetSampleRate,
           });
         } else if (type === 'error') {
-          console.error('[audio-capture] AudioWorklet error:', message || 'Unknown error');
-          this.emit('error', new Error(message || 'AudioWorklet error'));
+          const error = new Error(message || 'AudioWorklet error');
+          console.error('[audio-capture] AudioWorklet error:', error);
+          // CRITICAL: Emit error AND mark capture as failed to prevent silent failures
+          this.emit('error', error);
+          // Mark capture as failed so startCapture() can detect the failure
+          this.isCapturing = false;
+          // Don't return here - let the error propagate via event
         }
       };
 
@@ -201,7 +206,23 @@ export class AudioCaptureManager extends EventEmitter {
       }
     } catch (error) {
       console.error('[audio-capture] Failed to setup AudioWorklet:', error);
-      throw error;
+      // CRITICAL: Clean up partial state on error
+      if (this.audioWorkletNode) {
+        this.audioWorkletNode.port.onmessage = null;
+        try {
+          this.audioWorkletNode.disconnect();
+        } catch (disconnectError) {
+          // Ignore disconnect errors during cleanup
+        }
+        try {
+          this.audioWorkletNode.port.close();
+        } catch (closeError) {
+          // Ignore close errors during cleanup
+        }
+        this.audioWorkletNode = null;
+      }
+      this.isCapturing = false;
+      throw error; // Re-throw to propagate
     }
   }
 

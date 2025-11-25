@@ -54,23 +54,38 @@ const MainWindow: React.FC = () => {
     const manager = new AudioCaptureManager();
 
     // Set up audio chunk handler
-    manager.on('audio-chunk', (chunk: AudioChunk) => {
+    manager.on('audio-chunk', (chunk: unknown) => {
+      const audioChunk = chunk as AudioChunk;
+      if (!audioChunk || !audioChunk.data) {
+        console.warn('[renderer] Invalid audio chunk received');
+        return;
+      }
       console.log('[renderer] Audio chunk received from manager:', {
-        dataLength: chunk.data.length,
-        sampleRate: chunk.sampleRate,
-        maxAmplitude: Math.max(...Array.from(chunk.data)),
-        avgAmplitude: chunk.data.reduce((sum, val) => sum + Math.abs(val), 0) / chunk.data.length,
-        timestamp: chunk.timestamp
+        dataLength: audioChunk.data.length,
+        sampleRate: audioChunk.sampleRate,
+        maxAmplitude: Math.max(...Array.from(audioChunk.data)),
+        avgAmplitude: audioChunk.data.reduce((sum: number, val: number) => sum + Math.abs(val), 0) / audioChunk.data.length,
+        timestamp: audioChunk.timestamp
       });
 
       // Send audio chunk to main process for processing
       if (window.electronAPI) {
-        // Convert Float32Array to regular array for IPC
+        // Convert Float32Array to base64 for IPC to preserve precision
+        // Float32Array -> Uint8Array -> base64 string (using loop to avoid stack overflow)
+        const uint8Array = new Uint8Array(audioChunk.data.buffer);
+        let binaryString = '';
+        // Build binary string character by character to avoid stack overflow
+        for (let i = 0; i < uint8Array.length; i++) {
+          binaryString += String.fromCharCode(uint8Array[i]);
+        }
+        const base64Data = btoa(binaryString);
+        
         const chunkData = {
-          data: Array.from(chunk.data),
-          sampleRate: chunk.sampleRate,
-          channels: chunk.channels,
-          timestamp: chunk.timestamp,
+          data: base64Data, // Base64 encoded binary data
+          dataLength: audioChunk.data.length, // Original array length
+          sampleRate: audioChunk.sampleRate,
+          channels: audioChunk.channels,
+          timestamp: audioChunk.timestamp,
         };
         console.log('[renderer] Sending audio chunk to main process');
         window.electronAPI.send('audio-chunk', chunkData);
@@ -109,10 +124,15 @@ const MainWindow: React.FC = () => {
         if (attempts % 10 === 0) {
           console.log(`Checking session manager ready (attempt ${attempts}/${maxAttempts})...`);
         }
+        if (!window.electronAPI) {
+          console.error('window.electronAPI not available');
+          return;
+        }
         window.electronAPI
           .invoke('session-manager-ready')
-          .then((result: SessionManagerReadyPayload | undefined) => {
-            if (result?.ready) {
+          .then((result: unknown) => {
+            const payload = result as SessionManagerReadyPayload | undefined;
+            if (payload?.ready) {
               console.log('Session manager is ready! (via polling)');
               setIsReady(true);
               if (checkReadyInterval) {
@@ -148,9 +168,20 @@ const MainWindow: React.FC = () => {
           console.log('[renderer] Starting audio capture with config:', captureConfig);
           await manager.startCapture(captureConfig);
           console.log('[renderer] Audio capture started successfully');
+          // Send confirmation back to main process
+          if (window.electronAPI) {
+            window.electronAPI.send('audio-capture-ready', { success: true });
+          }
         } catch (err: unknown) {
           console.error('[renderer] Failed to start audio capture:', err);
           setError(getErrorMessage(err) || 'Failed to start audio capture');
+          // Send error confirmation
+          if (window.electronAPI) {
+            window.electronAPI.send('audio-capture-ready', { 
+              success: false, 
+              error: getErrorMessage(err) || 'Failed to start audio capture' 
+            });
+          }
         }
       });
 

@@ -272,11 +272,22 @@ ipcMain.handle('pause-session', async () => {
   }
 });
 
+// Handle audio capture ready confirmation from renderer
+ipcMain.on('audio-capture-ready', (_event, result: { success: boolean; error?: string }) => {
+  if (sessionManager) {
+    if (result.success) {
+      sessionManager.emit('audio-capture-ready');
+    } else {
+      sessionManager.emit('audio-capture-error', new Error(result.error || 'Audio capture failed'));
+    }
+  }
+});
+
 // Handle audio chunks from renderer
-ipcMain.on('audio-chunk', async (_event, chunkData: { data: number[]; sampleRate: number; channels: number; timestamp: number }) => {
+ipcMain.on('audio-chunk', async (_event, chunkData: { data: string; dataLength: number; sampleRate: number; channels: number; timestamp: number }) => {
   try {
     console.log('[main] audio-chunk IPC received:', {
-      dataLength: chunkData.data?.length,
+      dataLength: chunkData.dataLength,
       sampleRate: chunkData.sampleRate,
       channels: chunkData.channels,
       timestamp: chunkData.timestamp,
@@ -288,8 +299,14 @@ ipcMain.on('audio-chunk', async (_event, chunkData: { data: number[]; sampleRate
       return;
     }
 
-    // Convert array back to Float32Array
-    const float32Array = new Float32Array(chunkData.data);
+    // Decode base64 back to Float32Array to preserve precision
+    // Base64 string -> Uint8Array -> Float32Array
+    const binaryString = atob(chunkData.data);
+    const bytes = new Uint8Array(chunkData.dataLength * 4); // Float32 = 4 bytes per sample
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    const float32Array = new Float32Array(bytes.buffer);
     const maxAmplitude = float32Array.reduce(
       (max, value) => Math.max(max, Math.abs(value)),
       0

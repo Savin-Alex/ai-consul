@@ -177,6 +177,8 @@ export class AssemblyAIStreaming extends EventEmitter {
    * Buffer audio during disconnection
    */
   private bufferAudio(audioChunk: Float32Array): void {
+    const MAX_BUFFER_CHUNKS = 100; // Hard limit on array length to prevent memory exhaustion
+    
     // Estimate buffer duration (rough calculation: samples / sampleRate * 1000ms)
     const chunkDuration = (audioChunk.length / this.sampleRate) * 1000;
     const currentBufferDuration = this.audioBuffer.reduce(
@@ -184,16 +186,23 @@ export class AssemblyAIStreaming extends EventEmitter {
       0
     );
 
-    // Only buffer if under max duration
-    if (currentBufferDuration + chunkDuration <= this.maxBufferDuration) {
+    // CRITICAL: Check both duration AND array length to prevent unbounded growth
+    if (
+      (currentBufferDuration + chunkDuration <= this.maxBufferDuration) &&
+      (this.audioBuffer.length < MAX_BUFFER_CHUNKS)
+    ) {
       this.audioBuffer.push(audioChunk);
     } else {
-      console.warn('[AssemblyAI] Audio buffer full, dropping oldest chunks');
-      // Remove oldest chunks to make room
+      console.warn('[AssemblyAI] Audio buffer full, dropping oldest chunks', {
+        duration: currentBufferDuration,
+        chunks: this.audioBuffer.length,
+        maxDuration: this.maxBufferDuration,
+        maxChunks: MAX_BUFFER_CHUNKS
+      });
+      // Remove oldest chunks until we have room (check both duration and count)
       while (
-        this.audioBuffer.reduce((sum, chunk) => sum + (chunk.length / this.sampleRate) * 1000, 0) +
-          chunkDuration >
-        this.maxBufferDuration
+        this.audioBuffer.length >= MAX_BUFFER_CHUNKS ||
+        (this.audioBuffer.reduce((sum, chunk) => sum + (chunk.length / this.sampleRate) * 1000, 0) + chunkDuration > this.maxBufferDuration)
       ) {
         this.audioBuffer.shift();
       }
