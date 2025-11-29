@@ -971,11 +971,16 @@ export class SessionManager extends EventEmitter {
       this.speechEndTimeout = null;
     }
 
-    // Signal renderer to stop audio capture first (non-blocking)
+    // Signal renderer to stop audio capture
+    // Note: Audio capture cleanup happens asynchronously in the renderer process.
+    // The AudioStateManager ensures proper state transitions to IDLE.
+    // In a future enhancement, we could add IPC confirmation to wait for IDLE state.
     try {
       if (this.mainWindow && !this.mainWindow.isDestroyed()) {
         this.mainWindow.webContents.send('stop-audio-capture');
         console.log('[session] Sent stop-audio-capture signal to renderer');
+        // Small delay to allow renderer to process stop signal
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
     } catch (error) {
       console.warn('[session] Error sending stop-audio-capture:', error);

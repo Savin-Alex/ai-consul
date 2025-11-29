@@ -24,7 +24,7 @@ function createMainWindow(): void {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
-      sandbox: false,
+      sandbox: true, // Enable sandbox for enhanced security
     },
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
   });
@@ -55,7 +55,7 @@ function createCompanionWindow(): void {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
-      sandbox: false,
+      sandbox: true, // Enable sandbox for enhanced security
     },
   });
 
@@ -82,7 +82,7 @@ function createTranscriptWindow(): void {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
-      sandbox: false,
+      sandbox: true, // Enable sandbox for enhanced security
     },
     title: 'AI Consul Transcript',
   });
@@ -201,12 +201,23 @@ ipcMain.handle('session-manager-ready', () => {
 });
 
 // Session management IPC handlers - registered at module load, sessionManager checked at runtime
+// Prevent concurrent start-session calls
+let isStartingSession = false;
 ipcMain.handle('start-session', async (_event, config) => {
   console.log('[main] start-session IPC handler called with config:', config);
+  
+  // Prevent concurrent calls
+  if (isStartingSession) {
+    console.warn('[main] Session start already in progress, ignoring duplicate call');
+    return { success: false, error: 'Session start already in progress' };
+  }
+  
   if (!sessionManager) {
     console.error('[main] Session manager not initialized');
     throw new Error('Session manager not initialized. Please wait for the app to finish loading.');
   }
+  
+  isStartingSession = true;
   try {
     console.log('[main] Calling sessionManager.start()');
     await sessionManager.start(config);
@@ -217,10 +228,13 @@ ipcMain.handle('start-session', async (_event, config) => {
     }
     return { success: true };
   } catch (error: any) {
+    console.error('[main] Error starting session:', error);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('error', error.message || 'Failed to start session');
     }
     throw error;
+  } finally {
+    isStartingSession = false;
   }
 });
 
@@ -273,11 +287,20 @@ ipcMain.handle('pause-session', async () => {
 });
 
 // Handle audio capture ready confirmation from renderer
-ipcMain.on('audio-capture-ready', (_event, result: { success: boolean; error?: string }) => {
+ipcMain.on('audio-capture-ready', (_event, result: { success: boolean; error?: string; state?: string }) => {
   if (sessionManager) {
     if (result.success) {
-      sessionManager.emit('audio-capture-ready');
+      // Accept RECORDING or READY states (READY means audio is set up and ready to record)
+      if (result.state === 'recording' || result.state === 'ready') {
+        console.log(`[main] Audio capture ready, state: ${result.state}`);
+        sessionManager.emit('audio-capture-ready');
+      } else {
+        console.warn(`[main] Audio capture ready but state is ${result.state}, accepting anyway`);
+        // Accept any success response - the state might be transitional
+        sessionManager.emit('audio-capture-ready');
+      }
     } else {
+      console.error(`[main] Audio capture failed: ${result.error || 'Unknown error'}`);
       sessionManager.emit('audio-capture-error', new Error(result.error || 'Audio capture failed'));
     }
   }

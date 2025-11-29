@@ -127,6 +127,19 @@ const Settings: React.FC = () => {
 
       mediaRecorder.addEventListener('stop', () => {
         const blob = new Blob(recordedChunksRef.current, { type: mimeType || 'audio/webm' });
+        
+        // Check if we have any recorded data
+        if (blob.size === 0) {
+          console.error('No audio data recorded');
+          setMicTestStatus('error');
+          setMicTestMessage('No audio was recorded. Please try again.');
+          if (testStreamRef.current) {
+            testStreamRef.current.getTracks().forEach((track) => track.stop());
+            testStreamRef.current = null;
+          }
+          return;
+        }
+
         const url = URL.createObjectURL(blob);
         setPlaybackUrl(url);
         setMicTestStatus('playing');
@@ -134,12 +147,50 @@ const Settings: React.FC = () => {
 
         const audioElement = playbackAudioRef.current;
         if (audioElement) {
-          audioElement.src = url;
-          audioElement.play().catch((error) => {
-            console.error('Failed to play microphone test audio:', error);
+          // Clear previous source and error handlers
+          audioElement.onerror = null;
+          audioElement.onloadeddata = null;
+          
+          // Set up error handler before setting src
+          audioElement.onerror = () => {
+            console.error('Audio element error:', audioElement.error);
             setMicTestStatus('error');
-            setMicTestMessage('Unable to play the recording. Check your output device.');
-          });
+            setMicTestMessage('Unable to play the recording. The audio format may not be supported.');
+            URL.revokeObjectURL(url);
+          };
+
+          // Wait for audio to be ready before playing
+          const handleCanPlay = () => {
+            audioElement.play().catch((error) => {
+              console.error('Failed to play microphone test audio:', error);
+              setMicTestStatus('error');
+              setMicTestMessage('Unable to play the recording. Check your output device.');
+            });
+          };
+
+          // Try multiple events to ensure audio is ready
+          audioElement.onloadeddata = handleCanPlay;
+          audioElement.oncanplay = handleCanPlay;
+          
+          // Fallback: if loadedmetadata fires, try playing after a short delay
+          audioElement.onloadedmetadata = () => {
+            setTimeout(() => {
+              if (audioElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+                handleCanPlay();
+              }
+            }, 100);
+          };
+
+          // Set src after setting up handlers
+          audioElement.src = url;
+          audioElement.load(); // Force reload to trigger events
+          
+          // Fallback timeout in case events don't fire
+          setTimeout(() => {
+            if (audioElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && audioElement.paused) {
+              handleCanPlay();
+            }
+          }, 500);
         }
 
         if (testStreamRef.current) {
@@ -191,10 +242,20 @@ const Settings: React.FC = () => {
       setMicTestMessage('Microphone test complete. If you heard the playback, the microphone is working.');
     };
 
+    const handleError = () => {
+      if (audioElement.error) {
+        console.error('Audio playback error:', audioElement.error);
+        setMicTestStatus('error');
+        setMicTestMessage('Unable to play the recording. The audio format may not be supported.');
+      }
+    };
+
     audioElement.addEventListener('ended', handleEnded);
+    audioElement.addEventListener('error', handleError);
 
     return () => {
       audioElement.removeEventListener('ended', handleEnded);
+      audioElement.removeEventListener('error', handleError);
     };
   }, []);
 
@@ -300,7 +361,13 @@ const Settings: React.FC = () => {
                 </button>
               )}
             </div>
-            <audio ref={playbackAudioRef} className="mic-test-audio" controls style={{ display: playbackUrl ? 'block' : 'none' }} />
+            <audio 
+              ref={playbackAudioRef} 
+              className="mic-test-audio" 
+              controls 
+              preload="none"
+              style={{ display: playbackUrl ? 'block' : 'none' }} 
+            />
             {micTestMessage && (
               <div className={`mic-test-status ${micTestStatus}`}>
                 {micTestMessage}

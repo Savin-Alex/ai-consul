@@ -41,6 +41,23 @@
   font-size: 14px;
 }
 
+.audio-state-message {
+  background: #e3f2fd;
+  border: 1px solid #90caf9;
+  color: #1976d2;
+  padding: 12px;
+  border-radius: 6px;
+  margin-bottom: 24px;
+  font-size: 14px;
+  text-align: center;
+}
+
+.audio-state-message.error {
+  background: #fee;
+  border: 1px solid #fcc;
+  color: #c33;
+}
+
 .session-controls {
   margin-bottom: 32px;
 }

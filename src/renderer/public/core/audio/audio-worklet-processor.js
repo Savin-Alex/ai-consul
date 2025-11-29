@@ -76,7 +76,8 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
   
 
   /**
-   * Downsample audio from source rate to target rate using linear interpolation
+   * Downsample audio from source rate to target rate with anti-aliasing
+   * Uses simple averaging filter to prevent aliasing artifacts
    */
   downsample(input, sourceRate, targetRate) {
     if (sourceRate === targetRate) {
@@ -86,14 +87,23 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
     const ratio = sourceRate / targetRate;
     const outputLength = Math.floor(input.length / ratio);
     const output = new Float32Array(outputLength);
-
+    
+    // Anti-aliasing: average samples instead of simple interpolation
+    // This prevents high frequencies from folding back into the spectrum
+    const filterSize = Math.ceil(ratio);
+    
     for (let i = 0; i < outputLength; i++) {
-      const sourceIndex = i * ratio;
-      const indexFloor = Math.floor(sourceIndex);
-      const indexCeil = Math.min(indexFloor + 1, input.length - 1);
-      const weight = sourceIndex - indexFloor;
-
-      output[i] = input[indexFloor] + (input[indexCeil] - input[indexFloor]) * weight;
+      const sourceStart = Math.floor(i * ratio);
+      const sourceEnd = Math.min(sourceStart + filterSize, input.length);
+      
+      // Average samples in the filter window to reduce aliasing
+      let sum = 0;
+      let count = 0;
+      for (let j = sourceStart; j < sourceEnd; j++) {
+        sum += input[j];
+        count++;
+      }
+      output[i] = count > 0 ? sum / count : 0;
     }
 
     return output;
@@ -275,21 +285,8 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
   }
 
   /**
-   * Convert Float32Array (-1.0 to 1.0) to Int16Array (-32768 to 32767) for PCM compatibility
-   */
-  float32ToInt16(float32Array) {
-    const int16Array = new Int16Array(float32Array.length);
-    for (let i = 0; i < float32Array.length; i++) {
-      // Clamp value to [-1, 1] range and convert to Int16
-      const clamped = Math.max(-1, Math.min(1, float32Array[i]));
-      int16Array[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
-    }
-    return int16Array;
-  }
-
-  /**
    * Emit accumulated chunk to main thread
-   * Converts Float32 to Int16 PCM format for better transcription service compatibility
+   * Sends Float32Array data directly using Transferable objects to avoid GC pressure
    */
   emitChunk() {
     try {
@@ -305,17 +302,14 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
         offset += buffer.length;
       }
 
-      // Convert Float32 to Int16 PCM format for transcription services
-      const int16Chunk = this.float32ToInt16(chunk);
-
-      // Send to main thread
+      // Send to main thread using Transferable to avoid GC pressure
+      // Float32Array is sent directly (not converted to Int16) as VAD/transcription expect Float32
       this.port.postMessage({
         type: 'audio-chunk',
-        data: Array.from(int16Chunk), // Int16 PCM data
-        dataFormat: 'int16', // Indicate format to receiver
+        data: chunk, // Float32Array sent directly
         timestamp: currentTime,
         sampleRate: this.targetSampleRate,
-      });
+      }, [chunk.buffer]); // Transfer ownership to avoid copying
 
       // Reset buffer
       this.ringBuffer = [];
