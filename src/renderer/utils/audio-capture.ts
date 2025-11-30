@@ -1,3 +1,14 @@
+/**
+ * Audio Capture Manager for Renderer Process
+ * File: src/renderer/utils/audio-capture.ts
+ * 
+ * FIXED VERSION - includes getState() method
+ */
+
+import { AudioState } from './audio-state-manager';
+
+console.log('[audio-capture] Module loaded - version 2.0 with getState()');
+
 type Listener = (...args: unknown[]) => void;
 
 // Simple EventEmitter implementation for browser
@@ -36,6 +47,9 @@ export interface AudioChunk {
   timestamp: number;
 }
 
+// Re-export AudioState for convenience
+export { AudioState };
+
 export class AudioCaptureManager extends EventEmitter {
   private mediaStream: MediaStream | null = null;
   private audioContext: AudioContext | null = null;
@@ -45,6 +59,33 @@ export class AudioCaptureManager extends EventEmitter {
   private sampleRate = 16000;
   private channels = 1;
   private deviceId: string | undefined;
+  
+  // ========== CRITICAL FIX: State tracking ==========
+  private currentState: AudioState = AudioState.IDLE;
+
+  /**
+   * Get the current audio state
+   * THIS IS THE METHOD MainWindow.tsx NEEDS!
+   */
+  getState(): AudioState {
+    return this.currentState;
+  }
+
+  /**
+   * Update internal state and emit state-changed event
+   */
+  private setState(newState: AudioState): void {
+    const previousState = this.currentState;
+    this.currentState = newState;
+    console.log(`[audio-capture] State: ${previousState} -> ${newState}`);
+    
+    this.emit('state-changed', {
+      current: newState,
+      previous: previousState,
+      timestamp: Date.now(),
+    });
+  }
+  // ========== END CRITICAL FIX ==========
 
   async startCapture(options: {
     sources?: ('microphone' | 'system-audio')[];
@@ -62,6 +103,9 @@ export class AudioCaptureManager extends EventEmitter {
     this.deviceId = options.deviceId || undefined;
 
     try {
+      // Update state: requesting permission
+      this.setState(AudioState.REQUESTING_PERMISSION);
+
       // For microphone, use getUserMedia
       if (sources.includes('microphone')) {
         const audioConstraints: MediaTrackConstraints = {
@@ -75,6 +119,9 @@ export class AudioCaptureManager extends EventEmitter {
           audioConstraints.deviceId = { exact: this.deviceId };
         }
 
+        // Update state: initializing context
+        this.setState(AudioState.INITIALIZING_CONTEXT);
+
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: audioConstraints,
         });
@@ -86,8 +133,13 @@ export class AudioCaptureManager extends EventEmitter {
       // This will be implemented separately via IPC
 
       this.isCapturing = true;
+      
+      // Update state: recording
+      this.setState(AudioState.RECORDING);
+      
     } catch (error) {
       console.error('Failed to start audio capture:', error);
+      this.setState(AudioState.ERROR);
       throw error;
     }
   }
@@ -100,6 +152,9 @@ export class AudioCaptureManager extends EventEmitter {
       this.sampleRate = this.audioContext.sampleRate;
     }
     this.sourceNode = this.audioContext.createMediaStreamSource(stream);
+
+    // Update state: loading worklet
+    this.setState(AudioState.LOADING_WORKLET);
 
     // Create script processor for chunking (deprecated but works)
     // In production, use AudioWorklet for better performance
@@ -126,13 +181,13 @@ export class AudioCaptureManager extends EventEmitter {
         bufferLength: float32Array.length,
         maxAmplitude: maxAmplitude,
         avgAmplitude: avgAmplitude,
-        sampleRate: this.audioContext.sampleRate,
+        sampleRate: this.audioContext?.sampleRate,
         isCapturing: this.isCapturing
       });
 
       const chunk: AudioChunk = {
         data: float32Array,
-        sampleRate: this.audioContext.sampleRate,
+        sampleRate: this.audioContext?.sampleRate || this.sampleRate,
         channels: this.channels,
         timestamp: Date.now(),
       };
@@ -142,6 +197,9 @@ export class AudioCaptureManager extends EventEmitter {
 
     this.sourceNode.connect(this.processorNode);
     this.processorNode.connect(this.audioContext.destination);
+    
+    // Update state: ready
+    this.setState(AudioState.READY);
   }
 
   async stopCapture(): Promise<void> {
@@ -149,7 +207,12 @@ export class AudioCaptureManager extends EventEmitter {
       return;
     }
 
+    // Update state: stopping
+    this.setState(AudioState.STOPPING);
     this.isCapturing = false;
+
+    // Update state: cleaning up
+    this.setState(AudioState.CLEANING_UP);
 
     if (this.processorNode) {
       this.processorNode.disconnect();
@@ -170,6 +233,9 @@ export class AudioCaptureManager extends EventEmitter {
       this.mediaStream.getTracks().forEach((track) => track.stop());
       this.mediaStream = null;
     }
+
+    // Update state: idle
+    this.setState(AudioState.IDLE);
   }
 
   getIsCapturing(): boolean {
@@ -190,4 +256,3 @@ export class AudioCaptureManager extends EventEmitter {
     }
   }
 }
-
