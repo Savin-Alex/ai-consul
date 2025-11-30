@@ -26,10 +26,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
   },
   send: (channel: string, data: any) => {
-    const validChannels = ['update-settings', 'audio-chunk'];
+    // FIXED: Added 'audio-capture-ready' to allow renderer to confirm audio capture started
+    const validChannels = ['update-settings', 'audio-chunk', 'audio-capture-ready'];
     if (validChannels.includes(channel)) {
       ipcRenderer.send(channel, data);
+    } else {
+      console.warn(`[preload] Blocked send to invalid channel: ${channel}`);
     }
   },
 });
-
