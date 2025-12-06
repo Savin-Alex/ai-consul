@@ -15,15 +15,15 @@ export interface TranscriptionPriorityConfig {
   privacyMode: boolean;
   allowCloud: boolean;
   allowLocal: boolean;
-  failoverOrder: Array<'local-whisper' | 'local-onnx' | 'cloud-assembly' | 'cloud-deepgram'>;
+  failoverOrder: Array<'local-whisper' | 'local-onnx' | 'whisper-native' | 'cloud-assembly' | 'cloud-deepgram'>;
   vadProvider?: VADProviderType;
 }
 
 const MODE_FAILOVER_MAP: Record<TranscriptionMode, Array<TranscriptionPriorityConfig['failoverOrder'][number]>> = {
-  'local-only': ['local-whisper', 'local-onnx'],
-  'local-first': ['local-whisper', 'local-onnx', 'cloud-assembly', 'cloud-deepgram'],
-  balanced: ['local-whisper', 'cloud-assembly', 'local-onnx', 'cloud-deepgram'],
-  'cloud-first': ['cloud-assembly', 'cloud-deepgram', 'local-whisper', 'local-onnx'],
+  'local-only': ['whisper-native', 'local-whisper', 'local-onnx'],
+  'local-first': ['whisper-native', 'local-whisper', 'local-onnx', 'cloud-assembly', 'cloud-deepgram'],
+  balanced: ['whisper-native', 'local-whisper', 'cloud-assembly', 'local-onnx', 'cloud-deepgram'],
+  'cloud-first': ['cloud-assembly', 'cloud-deepgram', 'whisper-native', 'local-whisper', 'local-onnx'],
   'cloud-only': ['cloud-assembly', 'cloud-deepgram'],
 };
 
