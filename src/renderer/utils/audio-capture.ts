@@ -5,7 +5,7 @@
  * FIXED VERSION - includes getState() method
  */
 
-import { AudioState } from './audio-state-manager';
+import { AudioState } from './audio-state';
 
 console.log('[audio-capture] Module loaded - version 2.0 with getState()');
 

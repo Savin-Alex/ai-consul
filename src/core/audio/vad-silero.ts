@@ -4,7 +4,8 @@
  * Optional enhancement over default VAD
  */
 
-import { loadTransformers } from './transformers';
+import * as path from 'path';
+import * as fs from 'fs';
 import { VADProvider, VADResult, VADEvent } from './vad-provider';
 
 enum VadState {
@@ -15,7 +16,8 @@ enum VadState {
 }
 
 export class SileroVADProvider implements VADProvider {
-  private model: any = null;
+  private session: any = null; // ONNX Runtime InferenceSession
+  private ort: any = null; // ONNX Runtime module
   private isInitialized = false;
   private initializationPromise: Promise<void> | null = null;
   private initializationError: Error | null = null;
@@ -48,14 +50,51 @@ export class SileroVADProvider implements VADProvider {
 
       try {
         console.log('[SileroVAD] Initializing Silero VAD model...');
-        const { pipeline: pipelineFn } = await loadTransformers();
+        
+        // Try to load ONNX Runtime
+        try {
+          this.ort = require('onnxruntime-node');
+        } catch (error) {
+          throw new Error('onnxruntime-node is not available. Please install it: npm install onnxruntime-node');
+        }
 
-        // Silero VAD model from HuggingFace
-        // Using silero/silero_vad as the model name
-        this.model = await pipelineFn('audio-classification', 'silero/silero_vad', {
-          quantized: true,
-          use_cache: false,
-        });
+        // Check for local model file (try multiple possible locations)
+        // Prefer quantized models for better performance, then full precision
+        const possiblePaths = [
+          // Quantized models (best performance) - from onnx-community/silero-vad
+          path.join(process.cwd(), 'models', 'silero-vad', 'onnx', 'model_q4f16.onnx'),
+          path.join(process.cwd(), 'models', 'silero-vad', 'onnx', 'model_fp16.onnx'),
+          path.join(process.cwd(), 'models', 'silero-vad', 'onnx', 'model_q4.onnx'),
+          // Full precision models
+          path.join(process.cwd(), 'models', 'silero-vad', 'onnx', 'model.onnx'),
+          // Alternative: direct silero_vad.onnx file (from other sources)
+          path.join(process.cwd(), 'models', 'silero-vad', 'silero_vad.onnx'),
+          // Production build paths (quantized first)
+          path.join(__dirname, '../../models/silero-vad/onnx/model_q4f16.onnx'),
+          path.join(__dirname, '../../models/silero-vad/onnx/model_fp16.onnx'),
+          path.join(__dirname, '../../models/silero-vad/onnx/model.onnx'),
+          path.join(__dirname, '../../models/silero-vad/silero_vad.onnx'),
+        ];
+
+        let modelPath: string | null = null;
+        for (const testPath of possiblePaths) {
+          if (fs.existsSync(testPath)) {
+            modelPath = path.resolve(testPath);
+            console.log(`[SileroVAD] Found model at: ${modelPath}`);
+            break;
+          }
+        }
+
+        if (!modelPath) {
+          throw new Error(
+            `Silero VAD model not found. Checked paths:\n${possiblePaths.map(p => `  - ${p}`).join('\n')}\n\n` +
+            'Please download it using:\n' +
+            '  huggingface-cli download onnx-community/silero-vad onnx/model_q4f16.onnx --local-dir ./models/silero-vad\n' +
+            '  (or onnx/model.onnx for full precision)'
+          );
+        }
+
+        this.session = await this.ort.InferenceSession.create(modelPath);
 
         this.isInitialized = true;
         console.log('[SileroVAD] Silero VAD initialized');
@@ -73,6 +112,8 @@ export class SileroVADProvider implements VADProvider {
   }
 
   async isReady(): Promise<void> {
+    // If initialization failed, throw the error
+    // This allows VADProcessor to catch it and fallback
     if (this.initializationError) {
       throw this.initializationError;
     }
@@ -85,7 +126,12 @@ export class SileroVADProvider implements VADProvider {
       this.initializationPromise = this.initialize();
     }
 
-    return this.initializationPromise;
+    try {
+      return await this.initializationPromise;
+    } catch (error) {
+      // Re-throw to allow fallback handling
+      throw error;
+    }
   }
 
   resetState(): void {
@@ -117,26 +163,79 @@ export class SileroVADProvider implements VADProvider {
       await this.isReady();
     }
 
-    if (!this.model) {
-      console.warn('[SileroVAD] Model unavailable');
+    if (!this.session) {
+      console.warn('[SileroVAD] Model session unavailable');
       return { speech: false, pause: false };
     }
 
     try {
-      // Process audio chunk with Silero VAD
-      const result = await this.model(audioChunk, { topk: null });
-      const outputs = Array.isArray(result) ? result : [result];
+      // Silero VAD expects audio in specific format
+      // Input shape: [1, samples] where samples should be 512, 1024, 1536, or 2560
+      // We need to pad/truncate to one of these sizes
+      const targetSizes = [512, 1024, 1536, 2560];
+      let processedAudio = audioChunk;
+      
+      // Find the closest target size
+      let targetSize = targetSizes[0];
+      for (const size of targetSizes) {
+        if (audioChunk.length >= size) {
+          targetSize = size;
+        } else {
+          break;
+        }
+      }
+      
+      // Pad or truncate to target size
+      if (audioChunk.length !== targetSize) {
+        processedAudio = new Float32Array(targetSize);
+        if (audioChunk.length > targetSize) {
+          // Take the last targetSize samples
+          processedAudio.set(audioChunk.slice(-targetSize));
+        } else {
+          // Pad with zeros
+          processedAudio.set(audioChunk);
+        }
+      }
 
-      // Extract speech probability
+      // Prepare input tensor: shape [1, targetSize]
+      // ONNX Runtime expects Float32Array and shape array
+      if (!this.ort) {
+        throw new Error('ONNX Runtime not loaded');
+      }
+      const inputTensor = new this.ort.Tensor('float32', new Float32Array(processedAudio), [1, targetSize]);
+      
+      // Run inference - Silero VAD input name is typically 'input' or 'waveform'
+      const inputName = this.session.inputNames[0] || 'input';
+      const results = await this.session.run({ [inputName]: inputTensor });
+      
+      // Silero VAD outputs a single probability value
+      // Output shape is typically [1, 1] for speech probability
+      // Or [1, 2] for [NO_SPEECH, SPEECH] probabilities
       let speechProbability = 0;
-      for (const item of outputs) {
-        if (!item || typeof item !== 'object') continue;
-        const label = typeof item.label === 'string' ? item.label.toLowerCase() : '';
-        const score = typeof item.score === 'number' ? item.score : 0;
-
-        // Silero VAD typically outputs 'SPEECH' or 'NO_SPEECH'
-        if (label.includes('speech') && !label.includes('no')) {
-          speechProbability = Math.max(speechProbability, score);
+      
+      // Get the output tensor (usually first output or named 'output')
+      const outputName = this.session.outputNames[0] || 'output';
+      const outputTensor = results[outputName];
+      
+      if (outputTensor) {
+        const data = outputTensor.data;
+        
+        if (data instanceof Float32Array || data instanceof Float64Array) {
+          // If output is [NO_SPEECH, SPEECH], take the SPEECH probability (index 1)
+          // Or if it's a single value, use it directly
+          if (data.length >= 2) {
+            speechProbability = data[1]; // SPEECH probability
+          } else if (data.length === 1) {
+            speechProbability = data[0];
+          }
+        } else if (Array.isArray(data)) {
+          if (data.length >= 2) {
+            speechProbability = data[1];
+          } else if (data.length === 1) {
+            speechProbability = data[0];
+          }
+        } else if (typeof data === 'number') {
+          speechProbability = data;
         }
       }
 
@@ -246,10 +345,10 @@ export class SileroVADProvider implements VADProvider {
 
   private normalizeInitializationError(error: unknown): Error {
     if (error instanceof Error) {
-      if (error.message.includes('Unauthorized access to file')) {
+      if (error.message.includes('Unauthorized access to file') || error.message.includes('not found')) {
         const hint =
-          'Ensure the application can access Hugging Face to download the silero/silero_vad assets.';
-        return new Error(`${error.message} ${hint}`);
+          'Please download the model manually: huggingface-cli download freddyaboulton/silero-vad silero_vad.onnx --local-dir ./models/silero-vad';
+        return new Error(`${error.message}. ${hint}`);
       }
       return error;
     }

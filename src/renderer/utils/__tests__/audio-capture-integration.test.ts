@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { AudioCaptureManager } from '../audio-capture';
-import { AudioState } from '../audio-state-manager';
+import { AudioState } from '../audio-state';
 
 describe('AudioCaptureManager Integration', () => {
   let manager: AudioCaptureManager;

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { AudioStateManager, AudioState } from '../audio-state-manager';
+import { AudioStateManager } from '../audio-state-manager';
+import { AudioState } from '../audio-state';
 
 describe('AudioStateManager', () => {
   let manager: AudioStateManager;

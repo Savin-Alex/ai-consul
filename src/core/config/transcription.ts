@@ -36,7 +36,7 @@ const DEFAULTS: TranscriptionPriorityConfig = {
   allowCloud: true,
   allowLocal: true,
   failoverOrder: MODE_FAILOVER_MAP['local-first'],
-  vadProvider: 'default',
+  vadProvider: 'silero',
 };
 
 function parseBoolean(value: string | undefined, fallback: boolean): boolean {
@@ -64,13 +64,13 @@ export function normalizeMode(rawMode?: string): TranscriptionMode {
 
 function normalizeVADProvider(rawProvider?: string): VADProviderType {
   if (!rawProvider) {
-    return DEFAULTS.vadProvider || 'default';
+    return DEFAULTS.vadProvider || 'silero';
   }
   const normalized = rawProvider.toLowerCase() as VADProviderType;
   if (normalized === 'silero' || normalized === 'default') {
     return normalized;
   }
-  return DEFAULTS.vadProvider || 'default';
+  return DEFAULTS.vadProvider || 'silero';
 }
 
 export function resolveTranscriptionConfig(

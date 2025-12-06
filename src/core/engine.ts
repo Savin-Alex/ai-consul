@@ -226,9 +226,17 @@ export class AIConsulEngine extends EventEmitter {
           console.log('[engine] Initializing VAD...');
           const vadProvider = this.transcriptionConfig.vadProvider || 'default';
           this.vadProcessor = new VADProcessor(vadProvider);
-          await this.vadProcessor.isReady();
-          const providerName = this.vadProcessor.getProviderName ? this.vadProcessor.getProviderName() : vadProvider;
-          console.log(`[engine] VAD initialized (provider: ${providerName})`);
+          try {
+            await this.vadProcessor.isReady();
+            const providerName = this.vadProcessor.getProviderName ? this.vadProcessor.getProviderName() : vadProvider;
+            console.log(`[engine] VAD initialized (provider: ${providerName})`);
+          } catch (error) {
+            // VAD initialization failed, but we can continue without it
+            // The VADProcessor should have already fallen back to default
+            console.warn('[engine] VAD initialization had issues, but continuing with available provider');
+            const providerName = this.vadProcessor.getProviderName ? this.vadProcessor.getProviderName() : 'default';
+            console.log(`[engine] Using VAD provider: ${providerName}`);
+          }
         }
 
         this.isInitialized = true;
