@@ -325,6 +325,10 @@ const MainWindow: React.FC = () => {
       };
 
       // Store handlers in refs for cleanup
+      // Remove existing handler first to prevent duplicates
+      if (startAudioCaptureHandlerRef.current) {
+        window.electronAPI.removeListener('start-audio-capture', startAudioCaptureHandlerRef.current);
+      }
       startAudioCaptureHandlerRef.current = startAudioCaptureHandler;
       window.electronAPI.on('start-audio-capture', startAudioCaptureHandler);
 
@@ -351,6 +355,10 @@ const MainWindow: React.FC = () => {
       };
 
       // Store handler in ref for cleanup
+      // Remove existing handler first to prevent duplicates
+      if (stopAudioCaptureHandlerRef.current) {
+        window.electronAPI.removeListener('stop-audio-capture', stopAudioCaptureHandlerRef.current);
+      }
       stopAudioCaptureHandlerRef.current = stopAudioCaptureHandler;
       window.electronAPI.on('stop-audio-capture', stopAudioCaptureHandler);
 

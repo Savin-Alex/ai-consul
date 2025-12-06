@@ -80,6 +80,21 @@ export class LocalWhisper {
         });
       }
 
+      // Try to get model info for debugging
+      if (this.processor && this.processor.model && process.env.DEBUG_AUDIO === 'true') {
+        try {
+          const model = this.processor.model;
+          if (model.inputs) {
+            console.log('[whisper] Model input names:', model.inputs.map((inp: any) => inp.name || inp));
+          }
+          if (model.session && model.session.inputNames) {
+            console.log('[whisper] ONNX session input names:', model.session.inputNames);
+          }
+        } catch (debugError) {
+          // Ignore debug errors
+        }
+      }
+
       const result = await this.processor(audioChunk, {
         return_timestamps: false,
         sampling_rate: sampleRate,
@@ -95,6 +110,36 @@ export class LocalWhisper {
       return result.text || '';
     } catch (error) {
       console.error('Whisper transcription error:', error);
+      
+      // Enhanced error logging for input name issues
+      if (error instanceof Error && error.message.includes('Invalid input name')) {
+        console.error('[whisper] Input name error detected. Attempting to inspect model inputs...');
+        try {
+          if (this.processor?.model?.session) {
+            const session = this.processor.model.session;
+            console.error('[whisper] Expected input names:', session.inputNames || 'unknown');
+            console.error('[whisper] Model metadata:', {
+              inputNames: session.inputNames,
+              outputNames: session.outputNames,
+            });
+          }
+          // Also check processor model structure
+          if (this.processor?.model) {
+            console.error('[whisper] Processor model keys:', Object.keys(this.processor.model));
+            if (this.processor.model.model) {
+              console.error('[whisper] Nested model keys:', Object.keys(this.processor.model.model));
+            }
+          }
+        } catch (inspectError) {
+          console.error('[whisper] Could not inspect model:', inspectError);
+        }
+        
+        // Suggest clearing cache and retrying
+        console.error('[whisper] This might be a model cache issue. Try clearing the transformers cache:');
+        console.error('[whisper]   rm -rf ~/.cache/ai-consul/transformers');
+        console.error('[whisper]   or set TRANSFORMERS_CACHE environment variable');
+      }
+      
       if (error instanceof Error) {
         console.error('Whisper transcription stack:', error.stack);
         throw new Error(`Transcription failed: ${error.message}`);

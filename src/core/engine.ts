@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import { LocalWhisper } from './audio/whisper-local';
+import { WhisperCpp } from './audio/whisper-cpp';
 import { CloudWhisper } from './audio/whisper-cloud';
 import { AssemblyAIStreaming } from './audio/assemblyai-streaming';
 import { DeepgramStreaming } from './audio/deepgram-streaming';
@@ -82,7 +83,7 @@ export interface EngineConfig {
   };
   models: {
     transcription: {
-      primary: 'local-whisper-tiny' | 'local-whisper-base' | 'local-whisper-small' | 'cloud-whisper';
+      primary: 'local-whisper-tiny' | 'local-whisper-base' | 'local-whisper-small' | 'whisper-cpp-tiny' | 'whisper-cpp-base' | 'whisper-cpp-small' | 'whisper-cpp-medium' | 'cloud-whisper';
       fallback: 'cloud-whisper';
       mode?: 'batch' | 'streaming'; // Transcription mode
       streaming?: {
@@ -126,6 +127,7 @@ export class AIConsulEngine extends EventEmitter {
   private config: EngineConfig;
   private transcriptionConfig: TranscriptionPriorityConfig;
   private localWhisper: LocalWhisper | null = null;
+  private whisperCpp: WhisperCpp | null = null;
   private cloudWhisper: CloudWhisper | null = null;
   private assemblyAIStreaming: AssemblyAIStreaming | null = null;
   private deepgramStreaming: DeepgramStreaming | null = null;
@@ -211,15 +213,35 @@ export class AIConsulEngine extends EventEmitter {
         console.log('RAG engine initialized');
 
     if (this.transcriptionConfig.allowLocal) {
-          let modelSize: 'tiny' | 'base' | 'small' = 'tiny';
-          if (this.config.models.transcription.primary.includes('small')) {
-            modelSize = 'small';
-          } else if (this.config.models.transcription.primary.includes('base')) {
-            modelSize = 'base';
+          // Check if using whisper.cpp or transformers-based whisper
+          const primary = this.config.models.transcription.primary;
+          if (primary.startsWith('whisper-cpp-')) {
+            // Use whisper.cpp
+            let modelSize: 'tiny' | 'base' | 'small' | 'medium' = 'base';
+            if (primary.includes('medium')) {
+              modelSize = 'medium';
+            } else if (primary.includes('small')) {
+              modelSize = 'small';
+            } else if (primary.includes('tiny')) {
+              modelSize = 'tiny';
+            } else if (primary.includes('base')) {
+              modelSize = 'base';
+            }
+            console.log(`Initializing Whisper.cpp model (model size: ${modelSize})...`);
+            await this.getWhisperCpp().initialize(modelSize);
+            console.log('Whisper.cpp model initialized');
+          } else {
+            // Use transformers-based whisper
+            let modelSize: 'tiny' | 'base' | 'small' = 'tiny';
+            if (primary.includes('small')) {
+              modelSize = 'small';
+            } else if (primary.includes('base')) {
+              modelSize = 'base';
+            }
+            console.log(`Initializing Whisper model (model size: ${modelSize})...`);
+            await this.getLocalWhisper().initialize(modelSize);
+            console.log('Whisper model initialized');
           }
-          console.log(`Initializing Whisper model (model size: ${modelSize})...`);
-      await this.getLocalWhisper().initialize(modelSize);
-          console.log('Whisper model initialized');
         }
 
         if (!this.vadProcessor) {
@@ -373,7 +395,13 @@ export class AIConsulEngine extends EventEmitter {
   ): Promise<string> {
     switch (engineKey) {
       case 'local-whisper':
-        return this.getLocalWhisper().transcribe(audioChunk, sampleRate);
+        // Check if we should use whisper.cpp or transformers-based whisper
+        const primary = this.config.models.transcription.primary;
+        if (primary.startsWith('whisper-cpp-')) {
+          return this.getWhisperCpp().transcribe(audioChunk, sampleRate);
+        } else {
+          return this.getLocalWhisper().transcribe(audioChunk, sampleRate);
+        }
       case 'cloud-assembly':
         return this.transcribeWithAssemblyAI(audioChunk, sampleRate);
       case 'cloud-deepgram':
@@ -546,6 +574,13 @@ export class AIConsulEngine extends EventEmitter {
       this.localWhisper = new LocalWhisper();
     }
     return this.localWhisper;
+  }
+
+  private getWhisperCpp(): WhisperCpp {
+    if (!this.whisperCpp) {
+      this.whisperCpp = new WhisperCpp();
+    }
+    return this.whisperCpp;
   }
 
   private getCloudWhisper(): CloudWhisper {

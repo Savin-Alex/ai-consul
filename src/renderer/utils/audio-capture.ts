@@ -108,23 +108,43 @@ export class AudioCaptureManager extends EventEmitter {
 
       // For microphone, use getUserMedia
       if (sources.includes('microphone')) {
-        const audioConstraints: MediaTrackConstraints = {
-          sampleRate: this.sampleRate,
-          channelCount: this.channels,
+        // Update state: initializing context
+        this.setState(AudioState.INITIALIZING_CONTEXT);
+
+        // Try with ideal constraints first (more flexible)
+        let audioConstraints: MediaTrackConstraints = {
+          sampleRate: { ideal: this.sampleRate },
+          channelCount: { ideal: this.channels },
           echoCancellation: true,
           noiseSuppression: true,
         };
 
         if (this.deviceId && this.deviceId !== 'default') {
-          audioConstraints.deviceId = { exact: this.deviceId };
+          // Use ideal instead of exact to allow fallback
+          audioConstraints.deviceId = { ideal: this.deviceId };
         }
 
-        // Update state: initializing context
-        this.setState(AudioState.INITIALIZING_CONTEXT);
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: audioConstraints,
+          });
+        } catch (error) {
+          // If ideal constraints fail, try with minimal constraints
+          console.warn('[audio-capture] Ideal constraints failed, trying minimal constraints:', error);
+          const minimalConstraints: MediaTrackConstraints = {
+            echoCancellation: true,
+            noiseSuppression: true,
+          };
+          
+          if (this.deviceId && this.deviceId !== 'default') {
+            minimalConstraints.deviceId = { ideal: this.deviceId };
+          }
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: audioConstraints,
-        });
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: minimalConstraints,
+          });
+        }
 
         this.setupAudioProcessing(stream);
       }
@@ -146,11 +166,28 @@ export class AudioCaptureManager extends EventEmitter {
 
   private setupAudioProcessing(stream: MediaStream): void {
     this.mediaStream = stream;
-    this.audioContext = new AudioContext({ sampleRate: this.sampleRate });
-    // Update actual sample rate in case the browser chooses a different value
-    if (this.audioContext.sampleRate && this.audioContext.sampleRate !== this.sampleRate) {
+    
+    // Get the actual sample rate from the audio track
+    const audioTrack = stream.getAudioTracks()[0];
+    const trackSettings = audioTrack.getSettings();
+    const actualSampleRate = trackSettings.sampleRate || this.sampleRate;
+    
+    // Use the actual sample rate from the track, or fallback to desired rate
+    this.audioContext = new AudioContext({ sampleRate: actualSampleRate });
+    
+    // Update to the actual sample rate used
+    if (this.audioContext.sampleRate) {
       this.sampleRate = this.audioContext.sampleRate;
+      console.log(`[audio-capture] Using sample rate: ${this.sampleRate} Hz`);
     }
+    
+    // Get actual channel count from track
+    const actualChannels = trackSettings.channelCount || this.channels;
+    if (actualChannels !== this.channels) {
+      console.log(`[audio-capture] Using channel count: ${actualChannels} (requested: ${this.channels})`);
+      this.channels = actualChannels;
+    }
+    
     this.sourceNode = this.audioContext.createMediaStreamSource(stream);
 
     // Update state: loading worklet
