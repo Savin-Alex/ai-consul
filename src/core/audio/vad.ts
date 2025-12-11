@@ -46,13 +46,7 @@ export class VADProcessor {
         console.warn('[VAD] Falling back to default VAD provider');
         this.providerType = 'default';
         this.provider = this.createProvider('default');
-        try {
-          await this.provider.initialize();
-          console.log('[VAD] Default VAD provider initialized successfully');
-        } catch (fallbackError) {
-          console.error('[VAD] Failed to initialize default VAD provider:', fallbackError);
-          throw fallbackError;
-        }
+        await this.provider.initialize();
       } else {
         throw error;
       }
@@ -66,37 +60,10 @@ export class VADProcessor {
       if (!this.initializationPromise) {
         this.initializationPromise = this.initialize();
       }
-      try {
-        await this.initializationPromise;
-      } catch (error) {
-        // If initialization failed and we don't have a provider, try to ensure we have default
-        if (!this.provider && this.providerType !== 'default') {
-          console.warn('[VAD] Provider initialization failed, ensuring default provider is available');
-          this.providerType = 'default';
-          this.provider = this.createProvider('default');
-          await this.provider.initialize();
-        } else if (!this.provider) {
-          throw error;
-        }
-      }
-      return;
+      return this.initializationPromise;
     }
 
-    // If provider has an error (like Silero failed), don't throw - just return
-    // The fallback should have already happened in initialize()
-    try {
-      return await this.provider.isReady();
-    } catch (error) {
-      // If provider is not ready and it's not default, fallback to default
-      if (this.providerType !== 'default') {
-        console.warn('[VAD] Provider not ready, falling back to default');
-        this.providerType = 'default';
-        this.provider = this.createProvider('default');
-        await this.provider.initialize();
-        return;
-      }
-      throw error;
-    }
+    return this.provider.isReady();
   }
 
   public resetState(): void {

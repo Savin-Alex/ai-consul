@@ -1,6 +1,5 @@
 import { EventEmitter } from 'events';
 import { LocalWhisper } from './audio/whisper-local';
-import { WhisperCpp } from './audio/whisper-cpp';
 import { WhisperNative } from './audio/whisper-native';
 import { CloudWhisper } from './audio/whisper-cloud';
 import { AssemblyAIStreaming } from './audio/assemblyai-streaming';
@@ -84,7 +83,7 @@ export interface EngineConfig {
   };
   models: {
     transcription: {
-      primary: 'local-whisper-tiny' | 'local-whisper-base' | 'local-whisper-small' | 'whisper-cpp-tiny' | 'whisper-cpp-base' | 'whisper-cpp-small' | 'whisper-cpp-medium' | 'whisper-native-tiny' | 'whisper-native-base' | 'whisper-native-small' | 'cloud-whisper';
+      primary: 'local-whisper-tiny' | 'local-whisper-base' | 'local-whisper-small' | 'cloud-whisper';
       fallback: 'cloud-whisper';
       mode?: 'batch' | 'streaming'; // Transcription mode
       streaming?: {
@@ -128,7 +127,6 @@ export class AIConsulEngine extends EventEmitter {
   private config: EngineConfig;
   private transcriptionConfig: TranscriptionPriorityConfig;
   private localWhisper: LocalWhisper | null = null;
-  private whisperCpp: WhisperCpp | null = null;
   private whisperNative: WhisperNative | null = null;
   private cloudWhisper: CloudWhisper | null = null;
   private assemblyAIStreaming: AssemblyAIStreaming | null = null;
@@ -214,57 +212,32 @@ export class AIConsulEngine extends EventEmitter {
         await this.ragEngine.initialize();
         console.log('RAG engine initialized');
 
-    if (this.transcriptionConfig.allowLocal) {
-          // Check which transcription provider to use
-          const primary = this.config.models.transcription.primary;
+        if (this.transcriptionConfig.allowLocal) {
+          // Use whisper.cpp native addon (@fugood/whisper.node) instead of WASM
+          let modelSize: 'tiny' | 'base' | 'small' | 'medium' | 'large' = 'base';
+          if (this.config.models.transcription.primary.includes('large')) {
+            modelSize = 'large';
+          } else if (this.config.models.transcription.primary.includes('medium')) {
+            modelSize = 'medium';
+          } else if (this.config.models.transcription.primary.includes('small')) {
+            modelSize = 'small';
+          } else if (this.config.models.transcription.primary.includes('base')) {
+            modelSize = 'base';
+          } else if (this.config.models.transcription.primary.includes('tiny')) {
+            modelSize = 'tiny';
+          }
           
-          if (primary.startsWith('whisper-native-')) {
-            // Use native addon (@fugood/whisper.node)
-            let modelSize: 'tiny' | 'base' | 'small' = 'base';
-            if (primary.includes('small')) {
-              modelSize = 'small';
-            } else if (primary.includes('tiny')) {
-              modelSize = 'tiny';
-            } else if (primary.includes('base')) {
-              modelSize = 'base';
-            }
-            console.log(`Initializing WhisperNative model (model size: ${modelSize})...`);
-            try {
-              await this.getWhisperNative().initialize();
-              console.log('WhisperNative model initialized');
-            } catch (error) {
-              console.error('[engine] WhisperNative initialization failed:', error);
-              console.log('[engine] Falling back to WhisperCpp (child process)');
-              // Fallback to child process
-              await this.getWhisperCpp().initialize(modelSize);
-              console.log('WhisperCpp model initialized (fallback)');
-            }
-          } else if (primary.startsWith('whisper-cpp-')) {
-            // Use whisper.cpp (child process)
-            let modelSize: 'tiny' | 'base' | 'small' | 'medium' = 'base';
-            if (primary.includes('medium')) {
-              modelSize = 'medium';
-            } else if (primary.includes('small')) {
-              modelSize = 'small';
-            } else if (primary.includes('tiny')) {
-              modelSize = 'tiny';
-            } else if (primary.includes('base')) {
-              modelSize = 'base';
-            }
-            console.log(`Initializing Whisper.cpp model (model size: ${modelSize})...`);
-            await this.getWhisperCpp().initialize(modelSize);
-            console.log('Whisper.cpp model initialized');
-          } else {
-            // Use transformers-based whisper
-            let modelSize: 'tiny' | 'base' | 'small' = 'tiny';
-            if (primary.includes('small')) {
-              modelSize = 'small';
-            } else if (primary.includes('base')) {
-              modelSize = 'base';
-            }
-            console.log(`Initializing Whisper model (model size: ${modelSize})...`);
-            await this.getLocalWhisper().initialize(modelSize);
-            console.log('Whisper model initialized');
+          console.log(`[engine] Initializing WhisperNative (whisper.cpp) model (size: ${modelSize})...`);
+          try {
+            await this.getWhisperNative().initialize();
+            console.log('[engine] WhisperNative model initialized successfully');
+          } catch (error) {
+            console.warn('[engine] WhisperNative initialization failed, falling back to LocalWhisper:', error);
+            // Fallback to WASM implementation (only supports tiny/base/small)
+            const fallbackSize: 'tiny' | 'base' | 'small' = 
+              modelSize === 'large' || modelSize === 'medium' ? 'small' : modelSize;
+            await this.getLocalWhisper().initialize(fallbackSize);
+            console.log('[engine] LocalWhisper (WASM) model initialized');
           }
         }
 
@@ -272,17 +245,9 @@ export class AIConsulEngine extends EventEmitter {
           console.log('[engine] Initializing VAD...');
           const vadProvider = this.transcriptionConfig.vadProvider || 'default';
           this.vadProcessor = new VADProcessor(vadProvider);
-          try {
-            await this.vadProcessor.isReady();
-            const providerName = this.vadProcessor.getProviderName ? this.vadProcessor.getProviderName() : vadProvider;
-            console.log(`[engine] VAD initialized (provider: ${providerName})`);
-          } catch (error) {
-            // VAD initialization failed, but we can continue without it
-            // The VADProcessor should have already fallen back to default
-            console.warn('[engine] VAD initialization had issues, but continuing with available provider');
-            const providerName = this.vadProcessor.getProviderName ? this.vadProcessor.getProviderName() : 'default';
-            console.log(`[engine] Using VAD provider: ${providerName}`);
-          }
+          await this.vadProcessor.isReady();
+          const providerName = this.vadProcessor.getProviderName ? this.vadProcessor.getProviderName() : vadProvider;
+          console.log(`[engine] VAD initialized (provider: ${providerName})`);
         }
 
         this.isInitialized = true;
@@ -302,7 +267,7 @@ export class AIConsulEngine extends EventEmitter {
     return this.vadProcessor;
   }
 
-  async transcribe(audioChunk: Float32Array<ArrayBufferLike>, sampleRate: number = 16000): Promise<string> {
+  async transcribe(audioChunk: Float32Array, sampleRate: number = 16000): Promise<string> {
     let lastError: Error | null = null;
     for (const engineKey of this.transcriptionConfig.failoverOrder) {
       if (!this.isEngineAllowed(engineKey)) {
@@ -414,44 +379,42 @@ export class AIConsulEngine extends EventEmitter {
 
   private async transcribeWithEngine(
     engineKey: TranscriptionPriorityConfig['failoverOrder'][number],
-    audioChunk: Float32Array<ArrayBufferLike>,
+    audioChunk: Float32Array,
     sampleRate: number,
   ): Promise<string> {
-    const primary = this.config.models.transcription.primary;
-    
     switch (engineKey) {
       case 'whisper-native':
         // Use native addon (@fugood/whisper.node)
+        console.log(`[engine] whisper-native case: isReady=${this.whisperNative?.isReady()}`);
         if (this.whisperNative?.isReady()) {
           try {
+            console.log(`[engine] Calling WhisperNative.transcribeFloat32 with ${audioChunk.length} samples`);
             const result = await this.whisperNative.transcribeFloat32(audioChunk, {
               language: 'en',
             });
-            return result.text;
+            console.log(`[engine] WhisperNative result:`, {
+              text: result.text?.substring(0, 100),
+              textLength: result.text?.length,
+              segmentsCount: result.segments?.length
+            });
+            return result.text || '';
           } catch (error) {
             console.error('[engine] WhisperNative transcription failed:', error);
-            // Fallback to child process
-            return this.getWhisperCpp().transcribe(audioChunk, sampleRate);
+            throw error; // Let failover handle it
           }
         }
-        // Fallback to child process if native not available
-        return this.getWhisperCpp().transcribe(audioChunk, sampleRate);
+        console.warn('[engine] WhisperNative not ready, throwing error for failover');
+        throw new Error('WhisperNative not ready');
       case 'local-whisper':
-        // Check if we should use whisper-native, whisper.cpp, or transformers-based whisper
-        if (primary.startsWith('whisper-native-')) {
-          // Try native first, fallback to cpp
-          if (this.whisperNative?.isReady()) {
-            try {
-              const result = await this.whisperNative.transcribeFloat32(audioChunk);
-              return result.text;
-            } catch (error) {
-              console.error('[engine] WhisperNative failed, falling back to WhisperCpp:', error);
-              return this.getWhisperCpp().transcribe(audioChunk, sampleRate);
-            }
+        // Prefer native whisper.cpp, fallback to WASM if not available
+        if (this.whisperNative?.isReady()) {
+          try {
+            const result = await this.whisperNative.transcribeFloat32(audioChunk);
+            return result.text;
+          } catch (error) {
+            console.error('[engine] WhisperNative failed, falling back to LocalWhisper:', error);
+            return this.getLocalWhisper().transcribe(audioChunk, sampleRate);
           }
-          return this.getWhisperCpp().transcribe(audioChunk, sampleRate);
-        } else if (primary.startsWith('whisper-cpp-')) {
-          return this.getWhisperCpp().transcribe(audioChunk, sampleRate);
         } else {
           return this.getLocalWhisper().transcribe(audioChunk, sampleRate);
         }
@@ -533,7 +496,7 @@ export class AIConsulEngine extends EventEmitter {
     if (!this.transcriptionConfig.allowCloud && engineKey.startsWith('cloud')) {
       return false;
     }
-    if (!this.transcriptionConfig.allowLocal && (engineKey.startsWith('local') || engineKey === 'whisper-native')) {
+    if (!this.transcriptionConfig.allowLocal && engineKey.startsWith('local')) {
       return false;
     }
     if ((engineKey === 'cloud-assembly' || engineKey === 'cloud-deepgram') && !this.transcriptionConfig.allowCloud) {
@@ -545,23 +508,12 @@ export class AIConsulEngine extends EventEmitter {
     if (engineKey === 'local-onnx') {
       return false; // Placeholder until ONNX pipeline is implemented
     }
-    if (engineKey === 'whisper-native') {
-      // Check if native addon is available
-      return this.whisperNative?.isReady() ?? false;
-    }
     return true;
   }
 
   private getTimeoutForEngine(engineKey: TranscriptionPriorityConfig['failoverOrder'][number]): number {
     const isCloud = engineKey.startsWith('cloud');
-    if (isCloud) {
-      return this.transcriptionConfig.cloudTimeoutMs;
-    }
-    // Native addon should be faster, use shorter timeout
-    if (engineKey === 'whisper-native') {
-      return Math.min(this.transcriptionConfig.localTimeoutMs, 1500);
-    }
-    return this.transcriptionConfig.localTimeoutMs;
+    return isCloud ? this.transcriptionConfig.cloudTimeoutMs : this.transcriptionConfig.localTimeoutMs;
   }
 
   private async withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -633,41 +585,36 @@ export class AIConsulEngine extends EventEmitter {
     return this.config;
   }
 
-  private getLocalWhisper(): LocalWhisper {
-    if (!this.localWhisper) {
-      this.localWhisper = new LocalWhisper();
-    }
-    return this.localWhisper;
-  }
-
-  private getWhisperCpp(): WhisperCpp {
-    if (!this.whisperCpp) {
-      this.whisperCpp = new WhisperCpp();
-    }
-    return this.whisperCpp;
-  }
-
   private getWhisperNative(): WhisperNative {
     if (!this.whisperNative) {
-      const primary = this.config.models.transcription.primary;
-      let modelSize: 'tiny' | 'base' | 'small' = 'base';
-      
-      if (primary.includes('small')) {
+      // Determine model size from config
+      let modelSize: 'tiny' | 'base' | 'small' | 'medium' | 'large' = 'base';
+      if (this.config.models.transcription.primary.includes('large')) {
+        modelSize = 'large';
+      } else if (this.config.models.transcription.primary.includes('medium')) {
+        modelSize = 'medium';
+      } else if (this.config.models.transcription.primary.includes('small')) {
         modelSize = 'small';
-      } else if (primary.includes('tiny')) {
+      } else if (this.config.models.transcription.primary.includes('tiny')) {
         modelSize = 'tiny';
-      } else if (primary.includes('base')) {
-        modelSize = 'base';
       }
       
       this.whisperNative = new WhisperNative({
         modelSize,
         language: 'en',
         useGpu: true,
-        libVariant: 'default', // Can be enhanced with auto-detection
+        libVariant: 'default',
+        temperature: 0.0,
       });
     }
     return this.whisperNative;
+  }
+
+  private getLocalWhisper(): LocalWhisper {
+    if (!this.localWhisper) {
+      this.localWhisper = new LocalWhisper();
+    }
+    return this.localWhisper;
   }
 
   private getCloudWhisper(): CloudWhisper {

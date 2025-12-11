@@ -25,6 +25,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeListener(channel, callback);
     }
   },
+  // Alias for removeListener - compatibility with React components that use 'off'
+  off: (channel: string, callback: (...args: any[]) => void) => {
+    const validChannels = ['suggestions-update', 'transcriptions-update', 'session-status', 'error', 'start-audio-capture', 'stop-audio-capture', 'session-manager-ready'];
+    if (validChannels.includes(channel)) {
+      ipcRenderer.removeListener(channel, callback);
+    }
+  },
   send: (channel: string, data: any) => {
     // FIXED: Added 'audio-capture-ready' to allow renderer to confirm audio capture started
     const validChannels = ['update-settings', 'audio-chunk', 'audio-capture-ready'];

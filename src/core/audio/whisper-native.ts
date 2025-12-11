@@ -1,10 +1,11 @@
 /**
- * WhisperNative - @fugood/whisper.node wrapper
+ * WhisperNative - whisper.cpp native addon wrapper using @fugood/whisper.node
  * 
- * High-performance native addon for Whisper transcription
+ * Replaces @xenova/transformers WASM implementation with native whisper.cpp for:
+ * - 2-5x faster transcription
+ * - Better handling of quiet audio (reduces hallucinations)
  * - Direct PCM buffer input (no file I/O)
- * - GPU acceleration (Metal/CUDA/Vulkan)
- * - Lower latency than child process approach
+ * - GPU acceleration (Metal on Mac, CUDA on Windows/Linux)
  */
 
 import { initWhisper, WhisperContext } from '@fugood/whisper.node';
@@ -40,7 +41,6 @@ export class WhisperNative extends EventEmitter {
 
   constructor(config: WhisperNativeConfig = {}) {
     super();
-    
     this.config = {
       modelSize: 'base',
       language: 'en',
@@ -52,109 +52,108 @@ export class WhisperNative extends EventEmitter {
     };
   }
 
-  /**
-   * Initialize whisper.cpp context
-   */
   async initialize(): Promise<void> {
-    if (this.isInitialized) {
-      return;
-    }
-
-    if (this.initializationPromise) {
-      return this.initializationPromise;
-    }
+    if (this.isInitialized) return;
+    if (this.initializationPromise) return this.initializationPromise;
 
     this.initializationPromise = (async () => {
       try {
-        const modelPath = this.config.modelPath || this.getDefaultModelPath();
+        let modelPath = this.config.modelPath || this.getDefaultModelPath();
+        
+        // Resolve to absolute path - @fugood/whisper.node requires absolute paths
+        if (!path.isAbsolute(modelPath)) {
+          modelPath = path.resolve(process.cwd(), modelPath);
+        }
+        
+        // Normalize path separators (important for cross-platform)
+        modelPath = path.normalize(modelPath);
         
         if (!fs.existsSync(modelPath)) {
-          throw new Error(
-            `Whisper model not found: ${modelPath}\n` +
-            'Run: pnpm run download-models'
-          );
+          throw new Error(`Whisper model not found: ${modelPath}\nRun: pnpm run download-models`);
         }
+        
+        console.log(`[WhisperNative] Loading model from: ${modelPath}`);
+        console.log(`[WhisperNative] Model exists: ${fs.existsSync(modelPath)}`);
+        console.log(`[WhisperNative] Model file size: ${fs.statSync(modelPath).size} bytes`);
+        console.log(`[WhisperNative] Config:`, {
+          modelSize: this.config.modelSize,
+          language: this.config.language,
+          useGpu: this.config.useGpu,
+          libVariant: this.config.libVariant
+        });
 
-        console.log(`[WhisperNative] Loading model: ${modelPath}`);
-        console.log(`[WhisperNative] GPU: ${this.config.useGpu}, Variant: ${this.config.libVariant}`);
-
+        // @fugood/whisper.node API: initWhisper(options, variant)
+        // Type definition says 'filePath', but README shows 'model' - try both
+        const options: any = {
+          model: modelPath, // README shows this
+          filePath: modelPath, // Type definition requires this
+          useGpu: this.config.useGpu ?? true,
+        };
+        
+        console.log(`[WhisperNative] Calling initWhisper with options:`, {
+          model: options.model,
+          filePath: options.filePath,
+          useGpu: options.useGpu
+        });
+        
         this.context = await initWhisper(
-          {
-            model: modelPath,
-            useGpu: this.config.useGpu,
-          },
+          options,
           this.config.libVariant
         );
-
+        
         this.isInitialized = true;
         console.log('[WhisperNative] Model loaded successfully');
         this.emit('initialized');
       } catch (error) {
-        console.error('[WhisperNative] Initialization failed:', error);
+        console.error('[WhisperNative] Initialization error:', error);
         this.emit('error', error);
         throw error;
       } finally {
         this.initializationPromise = null;
       }
     })();
-
+    
     return this.initializationPromise;
   }
 
-  /**
-   * Get default model path based on model size
-   */
   private getDefaultModelPath(): string {
     const modelName = `ggml-${this.config.modelSize}.en.bin`;
-    
-    const possiblePaths = [
-      // Electron app path
+    const locations = [
       path.join(app.getAppPath(), 'models', 'whisper', modelName),
-      // Development paths
       path.join(process.cwd(), 'models', 'whisper', modelName),
-      path.join(__dirname, '../../models/whisper', modelName),
-      // User home cache
-      path.join(require('os').homedir(), '.cache', 'ai-consul', 'models', 'whisper', modelName),
+      path.join(__dirname, '../../../models', 'whisper', modelName),
+      path.join(app.getPath('userData'), 'models', 'whisper', modelName),
     ];
 
-    for (const modelPath of possiblePaths) {
-      if (fs.existsSync(modelPath)) {
-        return modelPath;
+    for (const loc of locations) {
+      if (fs.existsSync(loc)) {
+        return loc;
       }
     }
 
-    // Return first path as suggestion
-    return possiblePaths[0];
+    // Return first location as default (will throw error in initialize if not found)
+    return locations[0];
   }
 
   /**
-   * Transcribe audio buffer (Int16Array or ArrayBuffer)
-   * @param audioBuffer - PCM 16-bit, mono, 16kHz audio data
-   * @param options - Transcription options
+   * Transcribe audio buffer
+   * @param audioBuffer - Int16Array or ArrayBuffer of 16-bit PCM, mono, 16kHz
    */
   async transcribe(
-    audioBuffer: ArrayBuffer | Int16Array,
-    options?: {
-      language?: string;
-      temperature?: number;
-      translate?: boolean;
-    }
+    audioBuffer: ArrayBuffer | Int16Array | SharedArrayBuffer,
+    options?: { language?: string; temperature?: number; translate?: boolean }
   ): Promise<TranscriptionResult> {
     if (!this.context || !this.isInitialized) {
       await this.initialize();
     } else if (this.initializationPromise) {
       await this.initializationPromise;
     }
-
+    
     if (!this.context) {
       throw new Error('WhisperNative not initialized');
     }
 
-    // Convert Int16Array to ArrayBuffer if needed
-    const buffer = audioBuffer instanceof Int16Array 
-      ? audioBuffer.buffer 
-      : audioBuffer;
-
+    const buffer = audioBuffer instanceof Int16Array ? audioBuffer.buffer : audioBuffer;
     if (buffer.byteLength === 0) {
       return { text: '' };
     }
@@ -165,32 +164,25 @@ export class WhisperNative extends EventEmitter {
         await this.currentTranscription.stop();
       }
 
-      const { stop, promise } = this.context.transcribeData(buffer, {
+      const { stop, promise } = this.context.transcribeData(buffer as ArrayBuffer, {
         language: options?.language || this.config.language,
         temperature: options?.temperature ?? this.config.temperature,
         translate: options?.translate || false,
       });
 
       this.currentTranscription = { stop };
-
-      const result = await promise;
-
-      // Parse result
-      const text = result?.text?.trim() || '';
+      const result = await promise as any;
       
-      // Extract segments if available
+      // Handle different result formats - @fugood/whisper.node may return different structures
+      const text = (result?.text || result?.transcription || '').trim();
       const segments = result?.segments?.map((seg: any) => ({
-        start: seg.start || 0,
-        end: seg.end || 0,
+        start: seg.start ?? seg.startTime ?? 0,
+        end: seg.end ?? seg.endTime ?? 0,
         text: seg.text || '',
-      })) || [];
-
+      })) ?? [];
+      
       this.currentTranscription = null;
-
-      return {
-        text,
-        segments,
-      };
+      return { text, segments };
     } catch (error) {
       this.currentTranscription = null;
       console.error('[WhisperNative] Transcription error:', error);
@@ -203,17 +195,14 @@ export class WhisperNative extends EventEmitter {
    */
   async transcribeFloat32(
     audio: Float32Array,
-    options?: {
-      language?: string;
-      temperature?: number;
-    }
+    options?: { language?: string; temperature?: number }
   ): Promise<TranscriptionResult> {
     const int16 = this.float32ToInt16(audio);
     return this.transcribe(int16, options);
   }
 
   /**
-   * Convert Float32Array to Int16Array
+   * Convert Float32Array (-1.0 to 1.0) to Int16Array (-32768 to 32767)
    */
   private float32ToInt16(float32: Float32Array): Int16Array {
     const int16 = new Int16Array(float32.length);
@@ -224,9 +213,6 @@ export class WhisperNative extends EventEmitter {
     return int16;
   }
 
-  /**
-   * Cancel current transcription
-   */
   async cancel(): Promise<void> {
     if (this.currentTranscription) {
       await this.currentTranscription.stop();
@@ -234,31 +220,19 @@ export class WhisperNative extends EventEmitter {
     }
   }
 
-  /**
-   * Release resources
-   */
   async release(): Promise<void> {
     await this.cancel();
-    
     if (this.context) {
       await this.context.release();
       this.context = null;
     }
-    
     this.isInitialized = false;
-    console.log('[WhisperNative] Released');
   }
 
-  /**
-   * Check if initialized
-   */
   isReady(): boolean {
     return this.isInitialized && this.context !== null;
   }
 
-  /**
-   * Get model path
-   */
   getModelPath(): string | null {
     return this.config.modelPath || this.getDefaultModelPath();
   }

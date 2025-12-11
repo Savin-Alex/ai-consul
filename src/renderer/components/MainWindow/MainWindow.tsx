@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './MainWindow.css';
 import { AudioCaptureManager, AudioChunk } from '../../utils/audio-capture';
-import { AudioState } from '../../utils/audio-state';
+import { AudioState } from '../../utils/audio-state-manager';
 import { useAppStore } from '../../stores/app-state';
 
 interface SessionStatus {
@@ -47,46 +47,39 @@ const MainWindow: React.FC = () => {
     setMicrophones: state.setMicrophones,
   }));
   const selectedMicrophoneRef = useRef<string>(selectedMicrophoneId);
-  const startAudioCaptureHandlerRef = useRef<((config: AudioCaptureConfig) => Promise<void>) | null>(null);
-  const stopAudioCaptureHandlerRef = useRef<(() => Promise<void>) | null>(null);
-  const sessionStatusHandlerRef = useRef<((status: SessionStatus) => void) | null>(null);
-  const errorHandlerRef = useRef<((err: string) => void) | null>(null);
-  const sessionManagerReadyHandlerRef = useRef<((data: SessionManagerReadyPayload) => void) | null>(null);
-  // Prevent double registration in React StrictMode
-  const handlersRegisteredRef = useRef(false);
-  const managerRef = useRef<AudioCaptureManager | null>(null);
 
   useEffect(() => {
     selectedMicrophoneRef.current = selectedMicrophoneId;
   }, [selectedMicrophoneId]);
 
   useEffect(() => {
-    // CRITICAL: Prevent double registration in React 18 StrictMode
-    if (handlersRegisteredRef.current) {
-      console.log('[renderer] Handlers already registered, skipping duplicate');
-      return;
-    }
-    handlersRegisteredRef.current = true;
-
-    // Initialize audio manager ONCE
+    // Initialize audio manager
     const manager = new AudioCaptureManager();
-    managerRef.current = manager;
 
-    // Track capture state at module level (within this effect)
-    let captureInProgress = false;
-
-    // Set up audio chunk handler
-    manager.on('audio-chunk', (chunk: unknown) => {
+    // Set up audio chunk handler (store reference for cleanup)
+    const audioChunkHandler = (chunk: unknown) => {
       const audioChunk = chunk as AudioChunk;
       if (!audioChunk || !audioChunk.data) {
         console.warn('[renderer] Invalid audio chunk received');
         return;
       }
+      // Calculate max amplitude safely (avoid stack overflow with large arrays)
+      let maxAmplitude = 0;
+      let sumAmplitude = 0;
+      for (let i = 0; i < audioChunk.data.length; i++) {
+        const abs = Math.abs(audioChunk.data[i]);
+        if (abs > maxAmplitude) {
+          maxAmplitude = abs;
+        }
+        sumAmplitude += abs;
+      }
+      const avgAmplitude = sumAmplitude / audioChunk.data.length;
+      
       console.log('[renderer] Audio chunk received from manager:', {
         dataLength: audioChunk.data.length,
         sampleRate: audioChunk.sampleRate,
-        maxAmplitude: Math.max(...Array.from(audioChunk.data)),
-        avgAmplitude: audioChunk.data.reduce((sum: number, val: number) => sum + Math.abs(val), 0) / audioChunk.data.length,
+        maxAmplitude: maxAmplitude,
+        avgAmplitude: avgAmplitude,
         timestamp: audioChunk.timestamp
       });
 
@@ -114,35 +107,189 @@ const MainWindow: React.FC = () => {
       } else {
         console.error('[renderer] window.electronAPI not available for sending audio chunk');
       }
-    });
+    };
+    manager.on('audio-chunk', audioChunkHandler);
 
     // Listen for session status updates
     let checkReadyInterval: NodeJS.Timeout | null = null;
     const deviceChangeHandlers: Array<() => void> = [];
+    
+    // Store event handler references for cleanup
+    const sessionStatusHandler = (status: SessionStatus) => {
+      setSessionStatus(status);
+    };
+    
+    const errorHandler = (err: string) => {
+      setError(err);
+      setTimeout(() => setError(null), 5000);
+    };
+    
+    const sessionManagerReadyHandler = (data: SessionManagerReadyPayload) => {
+      console.log('Received session-manager-ready event:', data);
+      if (data?.ready) {
+        console.log('Setting ready state to true');
+        setIsReady(true);
+      }
+    };
+
+    // Subscribe to audio state changes (store handler reference for cleanup)
+    const stateChangedHandler = (event: any) => {
+      const newState = event.current as AudioState;
+      setAudioState(newState);
+      
+      // Set user-friendly state message
+      switch (newState) {
+        case AudioState.IDLE:
+          setAudioStateMessage('');
+          break;
+        case AudioState.REQUESTING_PERMISSION:
+          setAudioStateMessage('Requesting microphone permission...');
+          break;
+        case AudioState.INITIALIZING_CONTEXT:
+          setAudioStateMessage('Initializing audio context...');
+          break;
+        case AudioState.LOADING_WORKLET:
+          setAudioStateMessage('Loading audio processor...');
+          break;
+        case AudioState.READY:
+          setAudioStateMessage('Audio ready');
+          break;
+        case AudioState.RECORDING:
+          setAudioStateMessage('Recording...');
+          break;
+        case AudioState.STOPPING:
+          setAudioStateMessage('Stopping...');
+          break;
+        case AudioState.CLEANING_UP:
+          setAudioStateMessage('Cleaning up...');
+          break;
+        case AudioState.ERROR:
+          setAudioStateMessage('Audio error occurred');
+          break;
+        default:
+          setAudioStateMessage('');
+      }
+    };
+    manager.on('state-changed', stateChangedHandler);
+
+    // Store handler references for cleanup (declare outside if block)
+    // Use a flag to prevent concurrent handler executions
+    let isHandlingStart = false;
+    const startAudioCaptureHandler = async (config: AudioCaptureConfig) => {
+        // Prevent concurrent handler executions
+        if (isHandlingStart) {
+          console.warn('[renderer] Start handler already executing, ignoring duplicate call');
+          // Still send a response to prevent timeout
+          const currentState = manager.getState();
+          if (window.electronAPI) {
+            window.electronAPI.send('audio-capture-ready', { 
+              success: currentState === AudioState.RECORDING || currentState === AudioState.READY,
+              state: currentState,
+              error: 'Handler already executing'
+            });
+          }
+          return;
+        }
+
+        console.log('[renderer] Received start-audio-capture event with config:', config);
+        isHandlingStart = true;
+        
+        try {
+          // Check current state to prevent duplicate calls
+          const currentState = manager.getState();
+          if (currentState === AudioState.RECORDING) {
+            console.log('[renderer] Already recording, sending confirmation');
+            if (window.electronAPI) {
+              window.electronAPI.send('audio-capture-ready', { 
+                success: true,
+                state: currentState
+              });
+            }
+            return;
+          }
+
+          const captureConfig = {
+            ...config,
+            deviceId: selectedMicrophoneRef.current,
+          };
+          console.log('[renderer] Starting audio capture with config:', captureConfig);
+          
+          // Set a timeout to ensure we always send a response
+          const responseTimeout = setTimeout(() => {
+            if (isHandlingStart) {
+              console.error('[renderer] Audio capture start timeout, sending error response');
+              const timeoutState = manager.getState();
+              if (window.electronAPI) {
+                window.electronAPI.send('audio-capture-ready', { 
+                  success: false,
+                  error: 'Audio capture start timed out',
+                  state: timeoutState
+                });
+              }
+              isHandlingStart = false;
+            }
+          }, 10000); // 10 second timeout
+
+          try {
+            await manager.startCapture(captureConfig);
+            
+            // Wait for state to reach RECORDING or READY (with a small delay to ensure state is stable)
+            await new Promise(resolve => setTimeout(resolve, 200));
+            const finalState = manager.getState();
+            console.log('[renderer] Audio capture started, current state:', finalState);
+            
+            clearTimeout(responseTimeout);
+            
+            // Send confirmation back to main process with state information
+            // Accept RECORDING or READY as success (READY means audio is initialized and ready)
+            const isSuccess = finalState === AudioState.RECORDING || finalState === AudioState.READY;
+            if (window.electronAPI) {
+              window.electronAPI.send('audio-capture-ready', { 
+                success: isSuccess,
+                state: finalState
+              });
+            }
+            
+            if (!isSuccess) {
+              console.warn(`[renderer] Audio capture completed but state is ${finalState}, not RECORDING or READY`);
+            }
+          } catch (captureError) {
+            clearTimeout(responseTimeout);
+            throw captureError;
+          }
+        } catch (err: unknown) {
+          console.error('[renderer] Failed to start audio capture:', err);
+          setError(getErrorMessage(err) || 'Failed to start audio capture');
+          // Always send error confirmation to prevent timeout
+          if (window.electronAPI) {
+            window.electronAPI.send('audio-capture-ready', { 
+              success: false, 
+              error: getErrorMessage(err) || 'Failed to start audio capture',
+              state: manager.getState()
+            });
+          }
+        } finally {
+          isHandlingStart = false;
+        }
+    };
+
+    const stopAudioCaptureHandler = async () => {
+        console.log('[renderer] Received stop-audio-capture event');
+        try {
+          await manager.stopCapture();
+          console.log('[renderer] Audio capture stopped successfully');
+        } catch (err: unknown) {
+          console.error('[renderer] Failed to stop audio capture:', err);
+          setError(getErrorMessage(err) || 'Failed to stop audio capture');
+        }
+    };
 
     if (window.electronAPI) {
-      const sessionStatusHandler = (status: SessionStatus) => {
-        setSessionStatus(status);
-      };
-      sessionStatusHandlerRef.current = sessionStatusHandler;
       window.electronAPI.on('session-status', sessionStatusHandler);
-
-      const errorHandler = (err: string) => {
-        setError(err);
-        setTimeout(() => setError(null), 5000);
-      };
-      errorHandlerRef.current = errorHandler;
       window.electronAPI.on('error', errorHandler);
-
-      const sessionManagerReadyHandler = (data: SessionManagerReadyPayload) => {
-        console.log('Received session-manager-ready event:', data);
-        if (data?.ready) {
-          console.log('Setting ready state to true');
-          setIsReady(true);
-        }
-      };
-      sessionManagerReadyHandlerRef.current = sessionManagerReadyHandler;
       window.electronAPI.on('session-manager-ready', sessionManagerReadyHandler);
+      window.electronAPI.on('start-audio-capture', startAudioCaptureHandler);
+      window.electronAPI.on('stop-audio-capture', stopAudioCaptureHandler);
 
       let attempts = 0;
       const maxAttempts = 60;
@@ -186,182 +333,6 @@ const MainWindow: React.FC = () => {
 
       checkReadyInterval = setInterval(checkReady, 500);
 
-      // Subscribe to audio state changes
-      manager.on('state-changed', (event: any) => {
-        const newState = event.current as AudioState;
-        setAudioState(newState);
-        
-        // Set user-friendly state message
-        switch (newState) {
-          case AudioState.IDLE:
-            setAudioStateMessage('');
-            break;
-          case AudioState.REQUESTING_PERMISSION:
-            setAudioStateMessage('Requesting microphone permission...');
-            break;
-          case AudioState.INITIALIZING_CONTEXT:
-            setAudioStateMessage('Initializing audio context...');
-            break;
-          case AudioState.LOADING_WORKLET:
-            setAudioStateMessage('Loading audio processor...');
-            break;
-          case AudioState.READY:
-            setAudioStateMessage('Audio ready');
-            break;
-          case AudioState.RECORDING:
-            setAudioStateMessage('Recording...');
-            break;
-          case AudioState.STOPPING:
-            setAudioStateMessage('Stopping...');
-            break;
-          case AudioState.CLEANING_UP:
-            setAudioStateMessage('Cleaning up...');
-            break;
-          case AudioState.ERROR:
-            setAudioStateMessage('Audio error occurred');
-            break;
-          default:
-            setAudioStateMessage('');
-        }
-      });
-
-      // Store handler reference for cleanup
-      const startAudioCaptureHandler = async (config: AudioCaptureConfig) => {
-        // CRITICAL: Check BOTH the flag AND the manager state
-        const currentManager = managerRef.current;
-        if (!currentManager) {
-          console.error('[renderer] Manager not initialized');
-          if (window.electronAPI) {
-            window.electronAPI.send('audio-capture-ready', {
-              success: false,
-              error: 'Manager not initialized',
-            });
-          }
-          return;
-        }
-
-        const currentState = currentManager.getState();
-
-        // Prevent duplicate calls - check both flag and state
-        if (captureInProgress || currentState === AudioState.RECORDING || currentState === AudioState.READY) {
-          console.log('[renderer] Capture already in progress or ready, sending confirmation');
-          if (window.electronAPI) {
-            window.electronAPI.send('audio-capture-ready', {
-              success: true,
-              state: currentState,
-            });
-          }
-          return;
-        }
-
-        console.log('[renderer] Received start-audio-capture event with config:', config);
-        captureInProgress = true;
-        
-        try {
-
-          const captureConfig = {
-            ...config,
-            deviceId: config.deviceId || selectedMicrophoneRef.current,
-          };
-          console.log('[renderer] Starting audio capture with config:', captureConfig);
-          
-          // Set a timeout to ensure we always send a response
-          const responseTimeout = setTimeout(() => {
-            if (captureInProgress) {
-              console.error('[renderer] Audio capture start timeout, sending error response');
-              const timeoutState = currentManager.getState();
-              if (window.electronAPI) {
-                window.electronAPI.send('audio-capture-ready', { 
-                  success: false,
-                  error: 'Audio capture start timed out',
-                  state: timeoutState
-                });
-              }
-              captureInProgress = false;
-            }
-          }, 10000); // 10 second timeout
-
-          try {
-            await currentManager.startCapture(captureConfig);
-            
-            // Wait for state to reach RECORDING or READY (with a small delay to ensure state is stable)
-            await new Promise(resolve => setTimeout(resolve, 200));
-            const finalState = currentManager.getState();
-            console.log('[renderer] Audio capture started, current state:', finalState);
-            
-            clearTimeout(responseTimeout);
-            
-            // Send confirmation back to main process with state information
-            // Accept RECORDING or READY as success (READY means audio is initialized and ready)
-            const isSuccess = finalState === AudioState.RECORDING || finalState === AudioState.READY;
-            if (window.electronAPI) {
-              window.electronAPI.send('audio-capture-ready', { 
-                success: isSuccess,
-                state: finalState
-              });
-            }
-            
-            if (!isSuccess) {
-              console.warn(`[renderer] Audio capture completed but state is ${finalState}, not RECORDING or READY`);
-            }
-          } catch (captureError) {
-            clearTimeout(responseTimeout);
-            throw captureError;
-          }
-        } catch (err: unknown) {
-          console.error('[renderer] Failed to start audio capture:', err);
-          setError(getErrorMessage(err) || 'Failed to start audio capture');
-          // Always send error confirmation to prevent timeout
-          if (window.electronAPI) {
-            window.electronAPI.send('audio-capture-ready', { 
-              success: false, 
-              error: getErrorMessage(err) || 'Failed to start audio capture',
-              state: currentManager.getState()
-            });
-          }
-        } finally {
-          captureInProgress = false;
-        }
-      };
-
-      // Store handlers in refs for cleanup
-      // Remove existing handler first to prevent duplicates
-      if (startAudioCaptureHandlerRef.current) {
-        window.electronAPI.removeListener('start-audio-capture', startAudioCaptureHandlerRef.current);
-      }
-      startAudioCaptureHandlerRef.current = startAudioCaptureHandler;
-      window.electronAPI.on('start-audio-capture', startAudioCaptureHandler);
-
-      const stopAudioCaptureHandler = async () => {
-        console.log('[renderer] Received stop-audio-capture event');
-        const currentManager = managerRef.current;
-        
-        if (!currentManager) {
-          console.warn('[renderer] Manager not available for stop');
-          return;
-        }
-
-        // Reset capture flag
-        captureInProgress = false;
-
-        try {
-          // Force stop regardless of state
-          await currentManager.stopCapture();
-          console.log('[renderer] Audio capture stopped successfully');
-        } catch (err: unknown) {
-          console.error('[renderer] Failed to stop audio capture:', err);
-          setError(getErrorMessage(err) || 'Failed to stop audio capture');
-        }
-      };
-
-      // Store handler in ref for cleanup
-      // Remove existing handler first to prevent duplicates
-      if (stopAudioCaptureHandlerRef.current) {
-        window.electronAPI.removeListener('stop-audio-capture', stopAudioCaptureHandlerRef.current);
-      }
-      stopAudioCaptureHandlerRef.current = stopAudioCaptureHandler;
-      window.electronAPI.on('stop-audio-capture', stopAudioCaptureHandler);
-
       (async () => {
         const devices = await manager.listInputDevices();
         setMicrophones(devices);
@@ -395,34 +366,21 @@ const MainWindow: React.FC = () => {
     }
 
     return () => {
-      console.log('[renderer] Cleaning up MainWindow useEffect');
-      
-      // Remove IPC handlers (use removeListener, not 'off' - it doesn't exist in preload)
-      if (window.electronAPI) {
-        if (startAudioCaptureHandlerRef.current) {
-          window.electronAPI.removeListener('start-audio-capture', startAudioCaptureHandlerRef.current);
-        }
-        if (stopAudioCaptureHandlerRef.current) {
-          window.electronAPI.removeListener('stop-audio-capture', stopAudioCaptureHandlerRef.current);
-        }
-        if (sessionStatusHandlerRef.current) {
-          window.electronAPI.removeListener('session-status', sessionStatusHandlerRef.current);
-        }
-        if (errorHandlerRef.current) {
-          window.electronAPI.removeListener('error', errorHandlerRef.current);
-        }
-        if (sessionManagerReadyHandlerRef.current) {
-          window.electronAPI.removeListener('session-manager-ready', sessionManagerReadyHandlerRef.current);
-        }
+      // Remove IPC handlers
+      if (window.electronAPI?.removeListener) {
+        window.electronAPI.removeListener('session-status', sessionStatusHandler);
+        window.electronAPI.removeListener('error', errorHandler);
+        window.electronAPI.removeListener('session-manager-ready', sessionManagerReadyHandler);
+        window.electronAPI.removeListener('start-audio-capture', startAudioCaptureHandler);
+        window.electronAPI.removeListener('stop-audio-capture', stopAudioCaptureHandler);
       }
       
-      // CRITICAL: Stop the manager using ref
-      if (managerRef.current) {
-        managerRef.current.stopCapture().catch((err) => {
-          console.error('[renderer] Error stopping manager during cleanup:', err);
-        });
-        managerRef.current = null;
-      }
+      // Remove audio manager event listeners
+      manager.off('audio-chunk', audioChunkHandler);
+      manager.off('state-changed', stateChangedHandler);
+      
+      // Clean up audio manager
+      manager.stopCapture().catch(console.error);
       
       // Clean up interval
       if (checkReadyInterval) {
@@ -431,9 +389,6 @@ const MainWindow: React.FC = () => {
       
       // Clean up device change handlers
       deviceChangeHandlers.forEach((cleanup) => cleanup());
-      
-      // Reset registration flag to allow re-registration if component remounts
-      handlersRegisteredRef.current = false;
     };
   }, [setMicrophones]);
 

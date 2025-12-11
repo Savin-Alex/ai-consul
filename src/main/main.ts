@@ -24,7 +24,7 @@ function createMainWindow(): void {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
-      sandbox: true, // Enable sandbox for enhanced security
+      sandbox: false,
     },
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
   });
@@ -55,7 +55,7 @@ function createCompanionWindow(): void {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
-      sandbox: true, // Enable sandbox for enhanced security
+      sandbox: false,
     },
   });
 
@@ -82,9 +82,10 @@ function createTranscriptWindow(): void {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
-      sandbox: true, // Enable sandbox for enhanced security
+      sandbox: false,
     },
     title: 'AI Consul Transcript',
+    show: false, // Don't show immediately - will be shown when needed
   });
 
   if (isDev) {
@@ -94,6 +95,14 @@ function createTranscriptWindow(): void {
       hash: 'transcript',
     });
   }
+
+  // Show window when ready to receive messages
+  transcriptWindow.webContents.once('did-finish-load', () => {
+    if (transcriptWindow && !transcriptWindow.isDestroyed()) {
+      transcriptWindow.show();
+      console.log('[main] Transcript window ready and shown');
+    }
+  });
 
   transcriptWindow.on('closed', () => {
     transcriptWindow = null;
@@ -201,23 +210,12 @@ ipcMain.handle('session-manager-ready', () => {
 });
 
 // Session management IPC handlers - registered at module load, sessionManager checked at runtime
-// Prevent concurrent start-session calls
-let isStartingSession = false;
 ipcMain.handle('start-session', async (_event, config) => {
   console.log('[main] start-session IPC handler called with config:', config);
-  
-  // Prevent concurrent calls
-  if (isStartingSession) {
-    console.warn('[main] Session start already in progress, ignoring duplicate call');
-    return { success: false, error: 'Session start already in progress' };
-  }
-  
   if (!sessionManager) {
     console.error('[main] Session manager not initialized');
     throw new Error('Session manager not initialized. Please wait for the app to finish loading.');
   }
-  
-  isStartingSession = true;
   try {
     console.log('[main] Calling sessionManager.start()');
     await sessionManager.start(config);
@@ -228,13 +226,10 @@ ipcMain.handle('start-session', async (_event, config) => {
     }
     return { success: true };
   } catch (error: any) {
-    console.error('[main] Error starting session:', error);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('error', error.message || 'Failed to start session');
     }
     throw error;
-  } finally {
-    isStartingSession = false;
   }
 });
 
@@ -286,28 +281,14 @@ ipcMain.handle('pause-session', async () => {
   }
 });
 
-// Handle audio capture ready confirmation from renderer
-ipcMain.on('audio-capture-ready', (_event, result: { success: boolean; error?: string; state?: string }) => {
-  if (sessionManager) {
-    if (result.success) {
-      // Accept RECORDING or READY states (READY means audio is set up and ready to record)
-      if (result.state === 'recording' || result.state === 'ready') {
-        console.log(`[main] Audio capture ready, state: ${result.state}`);
-        sessionManager.emit('audio-capture-ready');
-      } else {
-        console.warn(`[main] Audio capture ready but state is ${result.state}, accepting anyway`);
-        // Accept any success response - the state might be transitional
-        sessionManager.emit('audio-capture-ready');
-      }
-    } else {
-      console.error(`[main] Audio capture failed: ${result.error || 'Unknown error'}`);
-      sessionManager.emit('audio-capture-error', new Error(result.error || 'Audio capture failed'));
-    }
-  }
-});
-
 // Handle audio chunks from renderer
-ipcMain.on('audio-chunk', async (_event, chunkData: { data: string; dataLength: number; sampleRate: number; channels: number; timestamp: number }) => {
+ipcMain.on('audio-chunk', async (_event, chunkData: { 
+  data: string; // Base64 encoded Float32Array buffer
+  dataLength: number; // Original array length
+  sampleRate: number; 
+  channels: number; 
+  timestamp: number 
+}) => {
   try {
     console.log('[main] audio-chunk IPC received:', {
       dataLength: chunkData.dataLength,
@@ -322,20 +303,69 @@ ipcMain.on('audio-chunk', async (_event, chunkData: { data: string; dataLength: 
       return;
     }
 
-    // Decode base64 back to Float32Array to preserve precision
-    // Base64 string -> Uint8Array -> Float32Array
-    const binaryString = atob(chunkData.data);
-    const bytes = new Uint8Array(chunkData.dataLength * 4); // Float32 = 4 bytes per sample
-    for (let i = 0; i < bytes.length; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
+    // Decode base64 back to Float32Array
+    let binaryString: string;
+    try {
+      binaryString = atob(chunkData.data);
+    } catch (error) {
+      console.error('[main] Failed to decode base64 audio data:', error);
+      return;
     }
-    const float32Array = new Float32Array(bytes.buffer);
-    const maxAmplitude = float32Array.reduce(
-      (max, value) => Math.max(max, Math.abs(value)),
-      0
-    );
-    const avgAmplitude =
-      float32Array.reduce((sum, val) => sum + Math.abs(val), 0) / float32Array.length;
+    
+    // Convert binary string to Uint8Array
+    const uint8Array = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      uint8Array[i] = binaryString.charCodeAt(i);
+    }
+    
+    // Expected byte length: Float32Array length * 4 bytes per float
+    const expectedByteLength = chunkData.dataLength * Float32Array.BYTES_PER_ELEMENT;
+    
+    // Validate buffer size matches expected
+    if (uint8Array.length !== expectedByteLength) {
+      console.error('[main] Audio buffer size mismatch after decode:', {
+        expectedBytes: expectedByteLength,
+        actualBytes: uint8Array.length,
+        expectedSamples: chunkData.dataLength,
+        actualSamples: uint8Array.length / Float32Array.BYTES_PER_ELEMENT
+      });
+      return;
+    }
+    
+    // Create Float32Array from the decoded buffer
+    // Use the buffer directly - it should be correctly aligned
+    const float32Array = new Float32Array(uint8Array.buffer, 0, chunkData.dataLength);
+    
+    // Validate decoded length matches expected
+    if (float32Array.length !== chunkData.dataLength) {
+      console.error('[main] Audio data length mismatch after decode:', {
+        expected: chunkData.dataLength,
+        actual: float32Array.length
+      });
+      return;
+    }
+    
+    // Debug: Log first few samples to verify data integrity
+    if (process.env.DEBUG_AUDIO === 'true' && float32Array.length > 0) {
+      console.log('[main] Decoded audio sample preview:', {
+        first3: Array.from(float32Array.slice(0, 3)),
+        max: Math.max(...Array.from(float32Array.slice(0, 100))),
+        min: Math.min(...Array.from(float32Array.slice(0, 100)))
+      });
+    }
+
+    // Calculate amplitude safely (avoid stack overflow with large arrays)
+    let maxAmplitude = 0;
+    let sumAmplitude = 0;
+    for (let i = 0; i < float32Array.length; i++) {
+      const abs = Math.abs(float32Array[i]);
+      if (abs > maxAmplitude) {
+        maxAmplitude = abs;
+      }
+      sumAmplitude += abs;
+    }
+    const avgAmplitude = sumAmplitude / float32Array.length;
+    
     const chunk = {
       data: float32Array,
       sampleRate: chunkData.sampleRate,

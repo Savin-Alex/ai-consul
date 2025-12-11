@@ -46,7 +46,7 @@ export class LocalWhisper {
     return this.initializationPromise;
   }
 
-  async transcribe(audioChunk: Float32Array<ArrayBufferLike>, sampleRate: number = 16000): Promise<string> {
+  async transcribe(audioChunk: Float32Array, sampleRate: number = 16000): Promise<string> {
     if (!audioChunk || audioChunk.length === 0) {
       if (process.env.DEBUG_AUDIO === 'true') {
         console.warn('[whisper] Received empty audio buffer, skipping transcription.');
@@ -69,38 +69,66 @@ export class LocalWhisper {
 
     try {
       if (process.env.DEBUG_AUDIO === 'true') {
+        // Calculate max/min safely (avoid stack overflow with large arrays)
+        let max = -Infinity;
+        let min = Infinity;
+        for (let i = 0; i < audioChunk.length; i++) {
+          const val = audioChunk[i];
+          if (val > max) max = val;
+          if (val < min) min = val;
+        }
+        
         console.log(`[whisper] transcribing ${audioChunk.length} samples at ${sampleRate}Hz (${audioChunk.length / sampleRate}s)`);
         console.log(`[whisper] audio data stats:`, {
           length: audioChunk.length,
-          max: Math.max(...Array.from(audioChunk)),
-          min: Math.min(...Array.from(audioChunk)),
+          max: max,
+          min: min,
           avg: audioChunk.reduce((sum, val) => sum + Math.abs(val), 0) / audioChunk.length,
           sampleRate: sampleRate,
           expectedDuration: audioChunk.length / sampleRate
         });
       }
 
-      // Try to get model info for debugging
-      if (this.processor && this.processor.model && process.env.DEBUG_AUDIO === 'true') {
-        try {
-          const model = this.processor.model;
-          if (model.inputs) {
-            console.log('[whisper] Model input names:', model.inputs.map((inp: any) => inp.name || inp));
-          }
-          if (model.session && model.session.inputNames) {
-            console.log('[whisper] ONNX session input names:', model.session.inputNames);
-          }
-        } catch (debugError) {
-          // Ignore debug errors
+      // Normalize audio amplitude if too quiet (helps Whisper detect speech better)
+      // Whisper works better with normalized audio - low amplitude can cause hallucinations
+      let normalizedAudio = audioChunk;
+      let maxAmplitude = 0;
+      for (let i = 0; i < audioChunk.length; i++) {
+        const abs = Math.abs(audioChunk[i]);
+        if (abs > maxAmplitude) maxAmplitude = abs;
+      }
+      
+      if (maxAmplitude > 0 && maxAmplitude < 0.1) {
+        // Audio is too quiet, normalize to reasonable level (50% of max range)
+        // This helps Whisper distinguish speech from background noise
+        const targetMax = 0.5;
+        const scaleFactor = targetMax / maxAmplitude;
+        normalizedAudio = new Float32Array(audioChunk.length);
+        let newMax = 0;
+        for (let i = 0; i < audioChunk.length; i++) {
+          const scaled = audioChunk[i] * scaleFactor;
+          normalizedAudio[i] = Math.max(-1, Math.min(1, scaled));
+          const abs = Math.abs(normalizedAudio[i]);
+          if (abs > newMax) newMax = abs;
         }
+        
+        console.log(`[whisper] Audio normalized (too quiet): ${maxAmplitude.toFixed(4)} -> ${newMax.toFixed(4)}`);
       }
 
-      const result = await this.processor(audioChunk, {
+      // Use basic parameters - transformers.js may not support all Whisper parameters
+      // Audio normalization above should help reduce hallucinations from quiet audio
+      const transcriptionOptions: any = {
         return_timestamps: false,
         sampling_rate: sampleRate,
         language: 'english',
         task: 'transcribe',
-      });
+      };
+
+      // Try to add prompt if supported (some versions of transformers.js support this)
+      // If not supported, it will be ignored silently
+      transcriptionOptions.initial_prompt = "This is a conversation. The person is speaking clearly.";
+
+      const result = await this.processor(normalizedAudio, transcriptionOptions);
 
       if (process.env.DEBUG_AUDIO === 'true') {
         console.log(`[whisper] result:`, result);
@@ -110,36 +138,6 @@ export class LocalWhisper {
       return result.text || '';
     } catch (error) {
       console.error('Whisper transcription error:', error);
-      
-      // Enhanced error logging for input name issues
-      if (error instanceof Error && error.message.includes('Invalid input name')) {
-        console.error('[whisper] Input name error detected. Attempting to inspect model inputs...');
-        try {
-          if (this.processor?.model?.session) {
-            const session = this.processor.model.session;
-            console.error('[whisper] Expected input names:', session.inputNames || 'unknown');
-            console.error('[whisper] Model metadata:', {
-              inputNames: session.inputNames,
-              outputNames: session.outputNames,
-            });
-          }
-          // Also check processor model structure
-          if (this.processor?.model) {
-            console.error('[whisper] Processor model keys:', Object.keys(this.processor.model));
-            if (this.processor.model.model) {
-              console.error('[whisper] Nested model keys:', Object.keys(this.processor.model.model));
-            }
-          }
-        } catch (inspectError) {
-          console.error('[whisper] Could not inspect model:', inspectError);
-        }
-        
-        // Suggest clearing cache and retrying
-        console.error('[whisper] This might be a model cache issue. Try clearing the transformers cache:');
-        console.error('[whisper]   rm -rf ~/.cache/ai-consul/transformers');
-        console.error('[whisper]   or set TRANSFORMERS_CACHE environment variable');
-      }
-      
       if (error instanceof Error) {
         console.error('Whisper transcription stack:', error.stack);
         throw new Error(`Transcription failed: ${error.message}`);

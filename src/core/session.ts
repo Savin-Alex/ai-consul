@@ -267,16 +267,8 @@ export class SessionManager extends EventEmitter {
   }
 
   private async processAudioChunkBatch(chunk: AudioChunk): Promise<void> {
-    // CRITICAL: Check isStopping FIRST, then isActive
-    // This ensures we reject chunks during and after stop sequence
-    // isStopping means we're in the process of stopping, so reject all new chunks
-    if (this.isStopping || !this.isActive) {
-      if (process.env.DEBUG_AUDIO === 'true') {
-        console.log('[session] Ignoring chunk - session stopping or inactive', { 
-          isStopping: this.isStopping, 
-          isActive: this.isActive 
-        });
-      }
+    // Early return if session is not active and not stopping (allow processing during flush)
+    if (!this.isActive && !this.isStopping) {
       return;
     }
 
@@ -316,22 +308,18 @@ export class SessionManager extends EventEmitter {
           : this.computeMaxAmplitude(audioData);
 
       // Process VAD with timeout to prevent hanging
-      let vadResult: VADResult;
+      let vadResult;
       try {
         vadResult = await Promise.race([
           vad.process(audioData, maxAmplitude),
           new Promise<VADResult>((resolve) => 
-            setTimeout(() => {
-              console.warn('[session] VAD processing timeout after 1s, defaulting to no speech');
-              resolve({ speech: false, pause: false });
-            }, 1000)
+            setTimeout(() => resolve({ speech: false, pause: false }), 1000)
           )
         ]);
       } catch (vadError) {
         console.error('[session] VAD processing error:', vadError);
-        // CRITICAL: Default to no speech on VAD error to prevent false positives
-        // This prevents buffer bloat from incorrect speech detection
-        vadResult = { speech: false, pause: false };
+        // Default to speech detection on VAD error to avoid blocking
+        vadResult = { speech: true, pause: false };
       }
 
       if (process.env.DEBUG_AUDIO === 'true') {
@@ -404,16 +392,21 @@ export class SessionManager extends EventEmitter {
           this.transcribeBufferedSpeech('vad-pause').catch((error) => {
             console.error('[session] Transcription error (non-blocking):', error);
           });
-        } else if (!vadResult.speech && this.speechBuffer.length > 0 && !this.isTranscribing && !this.speechEndTimeout && this.isActive && !this.isStopping) {
+        } else if (!vadResult.speech && this.speechBuffer.length > 0 && !this.isTranscribing && !this.speechEndTimeout) {
           // No speech detected, but we have buffered audio - set timeout to transcribe
           // This handles cases where pause detection doesn't trigger
-          // CRITICAL: Only set timeout if session is still active and not stopping
           if (process.env.DEBUG_AUDIO === 'true') {
             console.log('[session] Speech stopped, setting timeout to transcribe buffered audio');
           }
-          this.speechEndTimeout = setTimeout(() => {
-            // CRITICAL: Check session state before executing
-            if (this.speechBuffer.length > 0 && !this.isTranscribing && this.isActive && !this.isStopping) {
+          const timeoutId = setTimeout(() => {
+            // Additional safety: check if this timeout is still the current one
+            if (this.speechEndTimeout !== timeoutId) {
+              if (process.env.DEBUG_AUDIO === 'true') {
+                console.log('[session] Stale timeout, ignoring');
+              }
+              return;
+            }
+            if (this.speechBuffer.length > 0 && !this.isTranscribing && this.isActive) {
               if (process.env.DEBUG_AUDIO === 'true') {
                 console.log('[session] Speech end timeout triggered, transcribing buffered audio');
               }
@@ -423,6 +416,7 @@ export class SessionManager extends EventEmitter {
             }
             this.speechEndTimeout = null;
           }, this.speechEndTimeoutMs);
+          this.speechEndTimeout = timeoutId;
         }
       }
     } catch (error) {
@@ -485,6 +479,15 @@ export class SessionManager extends EventEmitter {
         this.targetSampleRate
       );
 
+      // DEBUG: Log raw transcription result to verify audio is reaching transcription engine
+      console.log('[session] RAW transcription result:', {
+        result: transcription,
+        type: typeof transcription,
+        length: transcription?.length,
+        isEmpty: !transcription || transcription.trim().length === 0,
+        preview: transcription?.substring(0, 100)
+      });
+
       if (process.env.DEBUG_AUDIO === 'true') {
         console.log('[session] Transcription result:', transcription);
       }
@@ -496,6 +499,15 @@ export class SessionManager extends EventEmitter {
       }
 
       const trimmedText = transcription.trim();
+      
+      // Log all transcriptions for debugging (helps verify initial_prompt fix)
+      console.log('[session] Whisper output:', {
+        text: trimmedText,
+        length: trimmedText.length,
+        isMusic: this.isMusicOrNonSpeech(trimmedText),
+        willAccept: trimmedText.length > 2 && !this.isMusicOrNonSpeech(trimmedText)
+      });
+      
       if (
         trimmedText.length > 2 && // Filter out very short transcriptions that are likely noise
         !this.isMusicOrNonSpeech(trimmedText)
@@ -519,9 +531,11 @@ export class SessionManager extends EventEmitter {
             // Don't throw - suggestions are optional
           });
       } else {
-        if (process.env.DEBUG_AUDIO === 'true' || this.isMusicOrNonSpeech(trimmedText)) {
-          console.log('[session] Filtered out transcription (music/non-speech):', trimmedText);
-        }
+        // Always log filtered transcriptions to help debug hallucinations
+        console.log('[session] Filtered out transcription:', {
+          reason: trimmedText.length <= 2 ? 'too_short' : 'music_or_non_speech',
+          text: trimmedText
+        });
       }
     } catch (error) {
       console.error('[session] Transcription failed:', error);
@@ -584,36 +598,12 @@ export class SessionManager extends EventEmitter {
       await this.engine.startSession(config);
       console.log('[session] Engine session started');
 
+      // Mark as active BEFORE starting audio capture to ensure chunks are processed
+      this.isActive = true;
+      console.log(`[session] Session marked as active (mode: ${this.streamingMode ? 'streaming' : 'batch'})`);
+
       // Signal renderer to start audio capture
       if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-        // Emit event to request audio capture start (main.ts will handle IPC)
-        // Use a promise that resolves when capture is ready
-        const captureReadyPromise = new Promise<void>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            this.removeListener('audio-capture-ready', readyHandler);
-            this.removeListener('audio-capture-error', errorHandler);
-            reject(new Error('Audio capture initialization timeout after 5 seconds'));
-          }, 5000);
-          
-          const readyHandler = () => {
-            clearTimeout(timeout);
-            this.removeListener('audio-capture-ready', readyHandler);
-            this.removeListener('audio-capture-error', errorHandler);
-            resolve();
-          };
-          
-          const errorHandler = (error: Error) => {
-            clearTimeout(timeout);
-            this.removeListener('audio-capture-ready', readyHandler);
-            this.removeListener('audio-capture-error', errorHandler);
-            reject(error);
-          };
-          
-          this.once('audio-capture-ready', readyHandler);
-          this.once('audio-capture-error', errorHandler);
-        });
-        
-        // Send signal to start capture
         this.mainWindow.webContents.send('start-audio-capture', {
           sources: ['microphone'],
           sampleRate: 16000,
@@ -621,28 +611,9 @@ export class SessionManager extends EventEmitter {
           useAudioWorklet: true,
         });
         console.log('[session] Sent start-audio-capture signal to renderer');
-        
-        // Emit event to notify main.ts to set up IPC listener
-        this.emit('request-audio-capture-confirmation');
-        
-        // Wait for confirmation (with timeout)
-        try {
-          await captureReadyPromise;
-          console.log('[session] Audio capture confirmed ready');
-        } catch (error) {
-          console.error('[session] Audio capture initialization failed:', error);
-          this.isActive = false;
-          this.currentConfig = null;
-          throw error;
-        }
       } else {
         console.warn('[session] Main window not available, cannot start audio capture');
       }
-
-      // Mark as active AFTER audio capture is confirmed ready
-      // This ensures chunks arriving after this point will be processed
-      this.isActive = true;
-      console.log(`[session] Session marked as active (mode: ${this.streamingMode ? 'streaming' : 'batch'})`);
 
       this.emit('session-started', config);
     } catch (error) {
@@ -651,35 +622,6 @@ export class SessionManager extends EventEmitter {
       this.isActive = false;
       this.currentConfig = null;
       throw error;
-    }
-  }
-
-  /**
-   * Clean up streaming event listeners to prevent memory leaks
-   * Should be called whenever streaming components are torn down
-   */
-  private cleanupStreamingEventListeners(): void {
-    if (this.cloudStreamingService) {
-      if (this.cloudStreamingEventHandlers.interim) {
-        this.cloudStreamingService.removeListener('interim', this.cloudStreamingEventHandlers.interim);
-      }
-      if (this.cloudStreamingEventHandlers.final) {
-        this.cloudStreamingService.removeListener('final', this.cloudStreamingEventHandlers.final);
-      }
-      if (this.cloudStreamingEventHandlers.error) {
-        this.cloudStreamingService.removeListener('error', this.cloudStreamingEventHandlers.error);
-      }
-      this.cloudStreamingEventHandlers = {};
-    }
-    
-    if (this.streamingEngine) {
-      this.streamingEngine.removeAllListeners('interim');
-      this.streamingEngine.removeAllListeners('final');
-      this.streamingEngine.removeAllListeners('error');
-    }
-    
-    if (this.sentenceAssembler) {
-      this.sentenceAssembler.removeAllListeners('sentence');
     }
   }
 
@@ -804,11 +746,6 @@ export class SessionManager extends EventEmitter {
         // Initialize streaming engine
         await this.streamingEngine.initialize();
 
-        // CRITICAL: Remove existing handlers first to prevent duplicates
-        this.streamingEngine.removeAllListeners('interim');
-        this.streamingEngine.removeAllListeners('final');
-        this.streamingEngine.removeAllListeners('error');
-
         // Setup event handlers
         this.streamingEngine.on('interim', (transcript: StreamingTranscript) => {
           this.handleInterimTranscript(transcript);
@@ -839,13 +776,9 @@ export class SessionManager extends EventEmitter {
       console.log(`[session] Streaming mode initialized (type: ${this.streamingServiceType})`);
     } catch (error) {
       console.error('[session] Failed to initialize streaming mode, falling back to batch:', error);
-      // CRITICAL: Clean up any partially attached listeners to prevent memory leaks
-      this.cleanupStreamingEventListeners();
       this.streamingMode = false;
       this.streamingEngine = null;
       this.sentenceAssembler = null;
-      this.cloudStreamingService = null;
-      throw error; // Re-throw to allow caller to handle
     }
   }
 
@@ -957,10 +890,9 @@ export class SessionManager extends EventEmitter {
 
     console.log('[session] Stopping session...', { wasActive, hadConfig });
 
-    // CRITICAL: Set both flags atomically to prevent race conditions
-    // This ensures chunks arriving after this point are rejected immediately
+    // Set stopping flag to allow processing during flush phase
+    // Keep isActive=true until after flush completes to allow final chunks
     this.isStopping = true;
-    this.isActive = false; // Set immediately to reject new chunks
     
     // Reset transcription flag to allow cleanup
     this.isTranscribing = false;
@@ -971,28 +903,32 @@ export class SessionManager extends EventEmitter {
       this.speechEndTimeout = null;
     }
 
-    // Signal renderer to stop audio capture
-    // Note: Audio capture cleanup happens asynchronously in the renderer process.
-    // The AudioStateManager ensures proper state transitions to IDLE.
-    // In a future enhancement, we could add IPC confirmation to wait for IDLE state.
+    // Signal renderer to stop audio capture first (non-blocking)
     try {
       if (this.mainWindow && !this.mainWindow.isDestroyed()) {
         this.mainWindow.webContents.send('stop-audio-capture');
         console.log('[session] Sent stop-audio-capture signal to renderer');
-        // Small delay to allow renderer to process stop signal
-        await new Promise(resolve => setTimeout(resolve, 100));
       }
     } catch (error) {
       console.warn('[session] Error sending stop-audio-capture:', error);
     }
 
-    // CRITICAL: Always cleanup event listeners to prevent memory leaks
-    // This must happen regardless of streamingMode state, as listeners may have been
-    // partially attached even if initialization failed
-    this.cleanupStreamingEventListeners();
-
     // Flush streaming components if active (with timeout to prevent hanging)
     if (this.streamingMode) {
+      // Remove event listeners first to prevent memory leaks
+      if (this.cloudStreamingService) {
+        if (this.cloudStreamingEventHandlers.interim) {
+          this.cloudStreamingService.removeListener('interim', this.cloudStreamingEventHandlers.interim);
+        }
+        if (this.cloudStreamingEventHandlers.final) {
+          this.cloudStreamingService.removeListener('final', this.cloudStreamingEventHandlers.final);
+        }
+        if (this.cloudStreamingEventHandlers.error) {
+          this.cloudStreamingService.removeListener('error', this.cloudStreamingEventHandlers.error);
+        }
+        // Clear handler references
+        this.cloudStreamingEventHandlers = {};
+      }
 
       const flushPromises: Promise<void>[] = [];
       const timeoutIds: NodeJS.Timeout[] = [];
@@ -1083,7 +1019,7 @@ export class SessionManager extends EventEmitter {
     this.sentenceAssembler = null;
     this.cloudStreamingService = null;
     this.streamingServiceType = 'local';
-    this.isStopping = false; // Reset stopping flag (isActive already false)
+    this.isStopping = false; // Reset stopping flag
 
     try {
       this.sendSuggestionsToUI([]);
@@ -1093,8 +1029,9 @@ export class SessionManager extends EventEmitter {
       console.warn('[session] Error sending final UI updates:', error);
     }
 
-    // Note: isActive was already set to false at the start of stop()
-    // to immediately reject new chunks and prevent race conditions
+    // Mark as inactive AFTER all cleanup is complete
+    // This ensures final chunks can be processed during flush
+    this.isActive = false;
 
     console.log('[session] Session stopped successfully');
     this.emit('session-stopped');
@@ -1115,12 +1052,53 @@ export class SessionManager extends EventEmitter {
   private sendTranscriptionsToUI(): void {
     const payload = this.transcripts;
 
+    // Send to transcript window
     if (this.transcriptWindow && !this.transcriptWindow.isDestroyed()) {
-      this.transcriptWindow.webContents.send('transcriptions-update', payload);
+      const webContents = this.transcriptWindow.webContents;
+      if (webContents && !webContents.isDestroyed()) {
+        try {
+          // Check if webContents is ready (not loading)
+          if (webContents.isLoading()) {
+            // Wait for load to finish, then send
+            webContents.once('did-finish-load', () => {
+              if (this.transcriptWindow && !this.transcriptWindow.isDestroyed() && !webContents.isDestroyed()) {
+                webContents.send('transcriptions-update', this.transcripts);
+                console.log('[session] Sent transcriptions to transcript window (after load):', {
+                  count: this.transcripts.length
+                });
+              }
+            });
+          } else {
+            // Window is ready, send immediately
+            webContents.send('transcriptions-update', payload);
+            console.log('[session] Sent transcriptions to transcript window:', {
+              count: payload.length,
+              entries: payload.map(t => t.text.substring(0, 50))
+            });
+          }
+        } catch (error) {
+          console.error('[session] Error sending transcriptions to transcript window:', error);
+        }
+      } else {
+        console.warn('[session] Transcript window webContents not available');
+      }
+    } else {
+      console.log('[session] Transcript window not available:', {
+        exists: this.transcriptWindow !== null,
+        destroyed: this.transcriptWindow?.isDestroyed() ?? true
+      });
     }
 
+    // Send to main window (for debugging/logging)
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      this.mainWindow.webContents.send('transcriptions-update', payload);
+      const webContents = this.mainWindow.webContents;
+      if (webContents && !webContents.isDestroyed()) {
+        try {
+          webContents.send('transcriptions-update', payload);
+        } catch (error) {
+          console.error('[session] Error sending transcriptions to main window:', error);
+        }
+      }
     }
   }
 
