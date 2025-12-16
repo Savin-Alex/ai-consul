@@ -16,7 +16,7 @@ declare global {
       invoke: (channel: string, data?: any) => Promise<unknown>;
       on: (channel: string, callback: (...args: any[]) => void) => void;
       removeListener: (channel: string, callback: (...args: any[]) => void) => void;
-      off: (channel: string, callback: (...args: any[]) => void) => void; // Alias for removeListener
+      off: (channel: string, callback: (...args: any[]) => void) => void;
       send: (channel: string, data: any) => void;
     };
   }

@@ -17,11 +17,11 @@ export class DefaultVADProvider implements VADProvider {
   private silenceChunkCount = 0;
 
   private readonly sampleRate = 16000;
-  private readonly minSilenceDurationMs = 1200;
+  private readonly minSilenceDurationMs = 800; // Reduced from 1200ms for more responsive pause detection
   private readonly speechThreshold = 0.5;
-  private readonly energyThreshold = 0.01;
-  private readonly speechConfidenceThreshold = 0.03; // Lowered from 0.25 - speech-commands model outputs lower confidence scores
-  private readonly pauseDelayChunks = 10;
+  private readonly energyThreshold = 0.02; // Increased from 0.01 - stricter threshold to avoid sending quiet/noisy audio
+  private readonly speechConfidenceThreshold = 0.05; // Increased from 0.03 - require higher confidence to avoid false positives
+  private readonly pauseDelayChunks = 6; // Reduced from 10 for faster pause detection
 
   getName(): string {
     return 'default';
@@ -188,18 +188,17 @@ export class DefaultVADProvider implements VADProvider {
       let pauseDetected = false;
 
       if (isSpeech) {
+        // Speech detected: reset silence tracking and set speech state
         this.speechDetected = true;
         this.accumulatedSilenceMs = 0;
         this.silenceChunkCount = 0;
       } else if (this.speechDetected) {
+        // No speech but we were in speech state: accumulate silence
         this.accumulatedSilenceMs += chunkDurationMs;
         this.silenceChunkCount += 1;
-        if (this.accumulatedSilenceMs >= this.minSilenceDurationMs) {
-          pauseDetected = true;
-          this.speechDetected = false;
-          this.accumulatedSilenceMs = 0;
-          this.silenceChunkCount = 0;
-        } else if (this.silenceChunkCount >= this.pauseDelayChunks) {
+        
+        // Check if we've accumulated enough silence to trigger pause
+        if (this.accumulatedSilenceMs >= this.minSilenceDurationMs || this.silenceChunkCount >= this.pauseDelayChunks) {
           pauseDetected = true;
           this.speechDetected = false;
           this.accumulatedSilenceMs = 0;
@@ -207,7 +206,11 @@ export class DefaultVADProvider implements VADProvider {
         }
       }
 
-      const speechActive = isSpeech || this.speechDetected;
+      // speechActive should reflect actual current speech, not latched state
+      // Only return true if we're actively detecting speech OR haven't accumulated enough silence yet
+      // speechActive should reflect actual current speech, not latched state
+      // Only return true if we're actively detecting speech OR haven't accumulated enough silence yet
+      const speechActive = isSpeech || (this.speechDetected && !pauseDetected);
 
       if (process.env.DEBUG_AUDIO === 'true') {
         const topLabel = topResult

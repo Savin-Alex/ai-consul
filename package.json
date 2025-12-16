@@ -31,7 +31,6 @@
     "test": "vitest",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest --coverage",
-    "download-models": "bash scripts/download-whisper-models.sh",
     "benchmark": "tsx scripts/benchmark.ts",
     "benchmark:local": "tsx scripts/benchmark.ts --modes local-only,local-first",
     "validate:wer": "tsx scripts/validate-wer.ts"

@@ -150,6 +150,8 @@ const Settings: React.FC = () => {
           // Clear previous source and error handlers
           audioElement.onerror = null;
           audioElement.onloadeddata = null;
+          audioElement.oncanplay = null;
+          audioElement.onended = null;
           
           // Set up error handler before setting src
           audioElement.onerror = () => {
@@ -159,35 +161,66 @@ const Settings: React.FC = () => {
             URL.revokeObjectURL(url);
           };
 
+          // Track if we've already started playing to prevent duplicate calls
+          let hasStartedPlaying = false;
+          
           // Wait for audio to be ready before playing
           const handleCanPlay = () => {
-            audioElement.play().catch((error) => {
-              console.error('Failed to play microphone test audio:', error);
+            if (hasStartedPlaying) {
+              return; // Already playing or played
+            }
+            
+            // Check if audio has valid duration
+            if (audioElement.duration === 0 || isNaN(audioElement.duration)) {
+              console.warn('Audio has invalid duration:', audioElement.duration);
               setMicTestStatus('error');
-              setMicTestMessage('Unable to play the recording. Check your output device.');
+              setMicTestMessage('Recording appears to be empty or corrupted.');
+              URL.revokeObjectURL(url);
+              return;
+            }
+            
+            hasStartedPlaying = true;
+            audioElement.play().then(() => {
+              setMicTestStatus('success');
+              setMicTestMessage(`Recording played successfully (${audioElement.duration.toFixed(1)}s)`);
+            }).catch((error) => {
+              // Interruption errors are normal - audio might finish quickly or be paused
+              if (error.message.includes('interrupted') || error.message.includes('pause')) {
+                // Check if audio actually played (ended or currentTime > 0)
+                if (audioElement.ended || audioElement.currentTime > 0) {
+                  setMicTestStatus('success');
+                  setMicTestMessage(`Recording played successfully (${audioElement.duration.toFixed(1)}s)`);
+                } else {
+                  // Audio didn't actually play - might be a real error
+                  console.warn('Audio playback was interrupted before starting:', error);
+                }
+              } else {
+                // Real error
+                console.error('Failed to play microphone test audio:', error);
+                setMicTestStatus('error');
+                setMicTestMessage('Unable to play the recording. Check your output device.');
+              }
             });
           };
-
-          // Try multiple events to ensure audio is ready
-          audioElement.onloadeddata = handleCanPlay;
-          audioElement.oncanplay = handleCanPlay;
           
-          // Fallback: if loadedmetadata fires, try playing after a short delay
-          audioElement.onloadedmetadata = () => {
-            setTimeout(() => {
-              if (audioElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-                handleCanPlay();
-              }
-            }, 100);
+          // Handle when playback ends
+          audioElement.onended = () => {
+            setMicTestStatus('success');
+            setMicTestMessage('Recording played successfully');
+            URL.revokeObjectURL(url);
           };
 
+          // Use a single event handler to avoid race conditions
+          // oncanplay is more reliable than onloadeddata
+          audioElement.oncanplay = handleCanPlay;
+          
           // Set src after setting up handlers
           audioElement.src = url;
           audioElement.load(); // Force reload to trigger events
           
-          // Fallback timeout in case events don't fire
+          // Fallback timeout in case events don't fire (only if not already playing)
           setTimeout(() => {
-            if (audioElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && audioElement.paused) {
+            if (!hasStartedPlaying && audioElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && audioElement.paused) {
               handleCanPlay();
             }
           }, 500);
@@ -199,11 +232,20 @@ const Settings: React.FC = () => {
         }
       });
 
-      mediaRecorder.start();
+      // Start recording with timeslice to ensure dataavailable events fire
+      // Timeslice of 100ms ensures we get periodic chunks
+      mediaRecorder.start(100);
 
       testTimeoutRef.current = window.setTimeout(() => {
         if (mediaRecorder.state !== 'inactive') {
-          mediaRecorder.stop();
+          // Request final data chunk before stopping
+          mediaRecorder.requestData();
+          // Small delay to ensure dataavailable event fires
+          setTimeout(() => {
+            if (mediaRecorder.state !== 'inactive') {
+              mediaRecorder.stop();
+            }
+          }, 100);
         }
         testTimeoutRef.current = null;
       }, 3000);

@@ -114,3 +114,23 @@ export function resolveTranscriptionConfig(
   return config;
 }
 
+/**
+ * Extract Whisper model size from transcription primary config string
+ * @param primary - The transcription primary config (e.g., 'local-whisper-base', 'local-whisper-tiny')
+ * @param defaultValue - Default model size if not found in primary string (defaults to 'small')
+ * @returns The detected model size ('tiny', 'base', or 'small')
+ */
+export function extractModelSize(
+  primary: string,
+  defaultValue: 'tiny' | 'base' | 'small' = 'small'
+): 'tiny' | 'base' | 'small' {
+  if (primary.includes('small')) {
+    return 'small';
+  } else if (primary.includes('tiny')) {
+    return 'tiny';
+  } else if (primary.includes('base')) {
+    return 'base';
+  }
+  return defaultValue;
+}
+

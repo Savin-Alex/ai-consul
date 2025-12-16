@@ -25,7 +25,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeListener(channel, callback);
     }
   },
-  // Alias for removeListener - compatibility with React components that use 'off'
+  // Alias for compatibility with React components
   off: (channel: string, callback: (...args: any[]) => void) => {
     const validChannels = ['suggestions-update', 'transcriptions-update', 'session-status', 'error', 'start-audio-capture', 'stop-audio-capture', 'session-manager-ready'];
     if (validChannels.includes(channel)) {

@@ -11,7 +11,7 @@ import { SecureDataFlow } from './security/privacy';
 import { PromptBuilder } from './prompts/builder';
 import { OutputValidator } from './prompts/validator';
 import { VADProcessor } from './audio/vad';
-import { resolveTranscriptionConfig, TranscriptionPriorityConfig } from './config/transcription';
+import { resolveTranscriptionConfig, TranscriptionPriorityConfig, extractModelSize } from './config/transcription';
 // Load JSON at runtime using fs to avoid import path issues
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -212,21 +212,9 @@ export class AIConsulEngine extends EventEmitter {
         await this.ragEngine.initialize();
         console.log('RAG engine initialized');
 
-        if (this.transcriptionConfig.allowLocal) {
-          // Use whisper.cpp native addon (@fugood/whisper.node) instead of WASM
-          let modelSize: 'tiny' | 'base' | 'small' | 'medium' | 'large' = 'base';
-          if (this.config.models.transcription.primary.includes('large')) {
-            modelSize = 'large';
-          } else if (this.config.models.transcription.primary.includes('medium')) {
-            modelSize = 'medium';
-          } else if (this.config.models.transcription.primary.includes('small')) {
-            modelSize = 'small';
-          } else if (this.config.models.transcription.primary.includes('base')) {
-            modelSize = 'base';
-          } else if (this.config.models.transcription.primary.includes('tiny')) {
-            modelSize = 'tiny';
-          }
-          
+    if (this.transcriptionConfig.allowLocal) {
+          // Determine model size from config (using shared utility function)
+          const modelSize = extractModelSize(this.config.models.transcription.primary, 'small');
           console.log(`[engine] Initializing WhisperNative (whisper.cpp) model (size: ${modelSize})...`);
           try {
             await this.getWhisperNative().initialize();
@@ -234,9 +222,8 @@ export class AIConsulEngine extends EventEmitter {
           } catch (error) {
             console.warn('[engine] WhisperNative initialization failed, falling back to LocalWhisper:', error);
             // Fallback to WASM implementation (only supports tiny/base/small)
-            const fallbackSize: 'tiny' | 'base' | 'small' = 
-              modelSize === 'large' || modelSize === 'medium' ? 'small' : modelSize;
-            await this.getLocalWhisper().initialize(fallbackSize);
+            // extractModelSize already returns 'tiny' | 'base' | 'small', so use it directly
+            await this.getLocalWhisper().initialize(modelSize);
             console.log('[engine] LocalWhisper (WASM) model initialized');
           }
         }
@@ -267,7 +254,7 @@ export class AIConsulEngine extends EventEmitter {
     return this.vadProcessor;
   }
 
-  async transcribe(audioChunk: Float32Array, sampleRate: number = 16000): Promise<string> {
+  async transcribe(audioChunk: Float32Array<ArrayBufferLike>, sampleRate: number = 16000): Promise<string> {
     let lastError: Error | null = null;
     for (const engineKey of this.transcriptionConfig.failoverOrder) {
       if (!this.isEngineAllowed(engineKey)) {
@@ -379,7 +366,7 @@ export class AIConsulEngine extends EventEmitter {
 
   private async transcribeWithEngine(
     engineKey: TranscriptionPriorityConfig['failoverOrder'][number],
-    audioChunk: Float32Array,
+    audioChunk: Float32Array<ArrayBufferLike>,
     sampleRate: number,
   ): Promise<string> {
     switch (engineKey) {
@@ -410,14 +397,13 @@ export class AIConsulEngine extends EventEmitter {
         if (this.whisperNative?.isReady()) {
           try {
             const result = await this.whisperNative.transcribeFloat32(audioChunk);
-            return result.text;
+            return result.text || '';
           } catch (error) {
             console.error('[engine] WhisperNative failed, falling back to LocalWhisper:', error);
             return this.getLocalWhisper().transcribe(audioChunk, sampleRate);
           }
-        } else {
-          return this.getLocalWhisper().transcribe(audioChunk, sampleRate);
         }
+        return this.getLocalWhisper().transcribe(audioChunk, sampleRate);
       case 'cloud-assembly':
         return this.transcribeWithAssemblyAI(audioChunk, sampleRate);
       case 'cloud-deepgram':
@@ -585,19 +571,17 @@ export class AIConsulEngine extends EventEmitter {
     return this.config;
   }
 
+  private getLocalWhisper(): LocalWhisper {
+    if (!this.localWhisper) {
+      this.localWhisper = new LocalWhisper();
+    }
+    return this.localWhisper;
+  }
+
   private getWhisperNative(): WhisperNative {
     if (!this.whisperNative) {
-      // Determine model size from config
-      let modelSize: 'tiny' | 'base' | 'small' | 'medium' | 'large' = 'base';
-      if (this.config.models.transcription.primary.includes('large')) {
-        modelSize = 'large';
-      } else if (this.config.models.transcription.primary.includes('medium')) {
-        modelSize = 'medium';
-      } else if (this.config.models.transcription.primary.includes('small')) {
-        modelSize = 'small';
-      } else if (this.config.models.transcription.primary.includes('tiny')) {
-        modelSize = 'tiny';
-      }
+      // Determine model size from config using extractModelSize utility
+      const modelSize = extractModelSize(this.config.models.transcription.primary, 'small');
       
       this.whisperNative = new WhisperNative({
         modelSize,
@@ -608,13 +592,6 @@ export class AIConsulEngine extends EventEmitter {
       });
     }
     return this.whisperNative;
-  }
-
-  private getLocalWhisper(): LocalWhisper {
-    if (!this.localWhisper) {
-      this.localWhisper = new LocalWhisper();
-    }
-    return this.localWhisper;
   }
 
   private getCloudWhisper(): CloudWhisper {

@@ -85,7 +85,6 @@ function createTranscriptWindow(): void {
       sandbox: false,
     },
     title: 'AI Consul Transcript',
-    show: false, // Don't show immediately - will be shown when needed
   });
 
   if (isDev) {
@@ -95,14 +94,6 @@ function createTranscriptWindow(): void {
       hash: 'transcript',
     });
   }
-
-  // Show window when ready to receive messages
-  transcriptWindow.webContents.once('did-finish-load', () => {
-    if (transcriptWindow && !transcriptWindow.isDestroyed()) {
-      transcriptWindow.show();
-      console.log('[main] Transcript window ready and shown');
-    }
-  });
 
   transcriptWindow.on('closed', () => {
     transcriptWindow = null;
@@ -161,7 +152,7 @@ ipcMain.handle('session-manager-ready', () => {
           },
           models: {
             transcription: {
-              primary: 'local-whisper-base',
+              primary: 'local-whisper-small',
               fallback: 'cloud-whisper',
               mode: transcriptionMode,
               streaming: enableStreaming ? {
@@ -283,8 +274,8 @@ ipcMain.handle('pause-session', async () => {
 
 // Handle audio chunks from renderer
 ipcMain.on('audio-chunk', async (_event, chunkData: { 
-  data: string; // Base64 encoded Float32Array buffer
-  dataLength: number; // Original array length
+  data: string;        // Base64 encoded Float32Array buffer
+  dataLength: number;  // Original array length
   sampleRate: number; 
   channels: number; 
   timestamp: number 
@@ -303,7 +294,11 @@ ipcMain.on('audio-chunk', async (_event, chunkData: {
       return;
     }
 
-    // Decode base64 back to Float32Array
+    // ==========================================
+    // CRITICAL FIX: Decode base64 to Float32Array
+    // ==========================================
+    
+    // Step 1: Decode base64 to binary string
     let binaryString: string;
     try {
       binaryString = atob(chunkData.data);
@@ -312,56 +307,64 @@ ipcMain.on('audio-chunk', async (_event, chunkData: {
       return;
     }
     
-    // Convert binary string to Uint8Array
+    // Step 2: Convert binary string to Uint8Array
     const uint8Array = new Uint8Array(binaryString.length);
     for (let i = 0; i < binaryString.length; i++) {
       uint8Array[i] = binaryString.charCodeAt(i);
     }
     
-    // Expected byte length: Float32Array length * 4 bytes per float
-    const expectedByteLength = chunkData.dataLength * Float32Array.BYTES_PER_ELEMENT;
-    
-    // Validate buffer size matches expected
-    if (uint8Array.length !== expectedByteLength) {
-      console.error('[main] Audio buffer size mismatch after decode:', {
-        expectedBytes: expectedByteLength,
-        actualBytes: uint8Array.length,
-        expectedSamples: chunkData.dataLength,
-        actualSamples: uint8Array.length / Float32Array.BYTES_PER_ELEMENT
+    // Step 3: Create Float32Array from decoded buffer
+    // CRITICAL: uint8Array.buffer might be larger than our data
+    // We need to create a view that matches the expected length
+    const expectedBytes = chunkData.dataLength * 4; // Float32 = 4 bytes per sample
+    if (uint8Array.length !== expectedBytes) {
+      console.error('[main] Uint8Array length mismatch:', {
+        expected: expectedBytes,
+        actual: uint8Array.length,
+        dataLength: chunkData.dataLength
       });
       return;
     }
     
-    // Create Float32Array from the decoded buffer
-    // Use the buffer directly - it should be correctly aligned
-    const float32Array = new Float32Array(uint8Array.buffer, 0, chunkData.dataLength);
+    // Create Float32Array view of the exact data we decoded
+    const float32Array = new Float32Array(uint8Array.buffer, uint8Array.byteOffset, chunkData.dataLength);
     
-    // Validate decoded length matches expected
+    // Step 4: Validate length matches expected
     if (float32Array.length !== chunkData.dataLength) {
-      console.error('[main] Audio data length mismatch after decode:', {
+      console.error('[main] Audio data length mismatch:', {
         expected: chunkData.dataLength,
         actual: float32Array.length
       });
       return;
     }
-    
-    // Debug: Log first few samples to verify data integrity
-    if (process.env.DEBUG_AUDIO === 'true' && float32Array.length > 0) {
-      console.log('[main] Decoded audio sample preview:', {
-        first3: Array.from(float32Array.slice(0, 3)),
-        max: Math.max(...Array.from(float32Array.slice(0, 100))),
-        min: Math.min(...Array.from(float32Array.slice(0, 100)))
-      });
-    }
 
-    // Calculate amplitude safely (avoid stack overflow with large arrays)
+    // DEBUG: Verify we have actual audio data after decoding
+    let maxVal = 0;
+    let minVal = 0;
+    let sumAbs = 0;
+    for (let i = 0; i < Math.min(100, float32Array.length); i++) {
+      const val = float32Array[i];
+      if (val > maxVal) maxVal = val;
+      if (val < minVal) minVal = val;
+      sumAbs += Math.abs(val);
+    }
+    const avgAbs = sumAbs / Math.min(100, float32Array.length);
+    
+    console.log('[main] AFTER decoding - Decoded Float32Array:', { 
+      length: float32Array.length,
+      first10: Array.from(float32Array.slice(0, 10)),
+      last10: Array.from(float32Array.slice(-10)),
+      max: maxVal,
+      min: minVal,
+      avgAbs: avgAbs,
+    });
+
+    // Calculate amplitude (use loop to avoid stack overflow)
     let maxAmplitude = 0;
     let sumAmplitude = 0;
     for (let i = 0; i < float32Array.length; i++) {
       const abs = Math.abs(float32Array[i]);
-      if (abs > maxAmplitude) {
-        maxAmplitude = abs;
-      }
+      if (abs > maxAmplitude) maxAmplitude = abs;
       sumAmplitude += abs;
     }
     const avgAmplitude = sumAmplitude / float32Array.length;
@@ -377,7 +380,6 @@ ipcMain.on('audio-chunk', async (_event, chunkData: {
     console.log('[main] Processing audio chunk:', {
       dataLength: float32Array.length,
       sampleRate: chunk.sampleRate,
-      channels: chunk.channels,
       maxAmplitude,
       avgAmplitude,
     });
@@ -424,7 +426,7 @@ app.whenReady().then(async () => {
     },
     models: {
       transcription: {
-        primary: 'local-whisper-base',
+        primary: 'local-whisper-small',
         fallback: 'cloud-whisper',
         mode: transcriptionMode,
         streaming: enableStreaming ? {

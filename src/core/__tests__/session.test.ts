@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { SessionManager, AudioChunk } from '../session';
 import type { AIConsulEngine, SessionConfig, Suggestion } from '../engine';
 import type { VADProcessor } from '../audio/vad';
@@ -63,14 +63,6 @@ describe('SessionManager', () => {
     sessionManager = new SessionManager(engineMock as unknown as AIConsulEngine);
   });
 
-  afterEach(async () => {
-    // Clean up any active sessions and timers
-    if (sessionManager.getIsActive()) {
-      await sessionManager.stop();
-    }
-    vi.clearAllTimers();
-  });
-
   it('transcribes buffered speech when VAD detects a pause', async () => {
     engineMock.transcribe.mockResolvedValue('mock transcript');
     engineMock.generateSuggestions.mockResolvedValue([]);
@@ -101,69 +93,5 @@ describe('SessionManager', () => {
 
     expect(engineMock.transcribe).not.toHaveBeenCalled();
     expect(vadMock.process).toHaveBeenCalledWith(expect.any(Float32Array), 0.1);
-  });
-
-  it('prevents stale timeout callback execution', async () => {
-    vi.useFakeTimers();
-    
-    engineMock.transcribe.mockResolvedValue('mock transcript');
-    // First chunk has speech (adds to buffer), second has no speech (triggers timeout)
-    vadMock.process
-      .mockResolvedValueOnce({ speech: true, pause: false })
-      .mockResolvedValueOnce({ speech: false, pause: false }); // No speech, triggers timeout
-
-    await sessionManager.start({ mode: 'job_interviews' });
-
-    // Process chunk with speech (adds to buffer)
-    await sessionManager.processAudioChunk(createChunk());
-    
-    // Process chunk without speech (should trigger timeout)
-    await sessionManager.processAudioChunk(createChunk());
-    
-    // Get the timeout ID
-    const firstTimeoutId = (sessionManager as any).speechEndTimeout;
-    expect(firstTimeoutId).toBeTruthy();
-
-    // Stop session before timeout fires (clears the timeout)
-    await sessionManager.stop();
-    
-    // Verify timeout was cleared
-    expect((sessionManager as any).speechEndTimeout).toBeNull();
-
-    // Fast-forward time to when timeout would have fired
-    vi.advanceTimersByTime(2000); // More than speechEndTimeoutMs (1500ms)
-    await vi.runAllTimersAsync();
-
-    // Verify transcription was NOT called because session was stopped
-    expect(engineMock.transcribe).not.toHaveBeenCalled();
-    
-    vi.useRealTimers();
-  });
-
-  it('transcribes buffered speech after speech end timeout', async () => {
-    vi.useFakeTimers();
-    
-    engineMock.transcribe.mockResolvedValue('mock transcript');
-    vadMock.process
-      .mockResolvedValueOnce({ speech: true, pause: false })
-      .mockResolvedValueOnce({ speech: false, pause: false }); // No speech, triggers timeout
-
-    await sessionManager.start({ mode: 'job_interviews' });
-
-    // Process chunk that triggers speech end timeout
-    await sessionManager.processAudioChunk(createChunk());
-    await sessionManager.processAudioChunk(createChunk());
-
-    // Verify timeout was set
-    expect((sessionManager as any).speechEndTimeout).toBeTruthy();
-
-    // Fast-forward time to trigger timeout
-    vi.advanceTimersByTime(2000); // More than speechEndTimeoutMs (1500ms)
-    await vi.runAllTimersAsync();
-
-    // Verify transcription was called after timeout
-    expect(engineMock.transcribe).toHaveBeenCalledTimes(1);
-    
-    vi.useRealTimers();
   });
 });

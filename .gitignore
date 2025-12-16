@@ -3,7 +3,7 @@ node_modules/
 .pnp
 .pnp.js
 /src/models/
-models/
+debug-audio/
 
 # Build outputs
 dist/

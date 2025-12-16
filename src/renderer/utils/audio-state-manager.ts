@@ -3,15 +3,15 @@
  * Used to track the current state of audio capture initialization and recording
  */
 export enum AudioState {
-  IDLE = 'idle',
-  REQUESTING_PERMISSION = 'requesting_permission',
-  INITIALIZING_CONTEXT = 'initializing_context',
-  LOADING_WORKLET = 'loading_worklet',
-  READY = 'ready',
-  RECORDING = 'recording',
-  STOPPING = 'stopping',
-  CLEANING_UP = 'cleaning_up',
-  ERROR = 'error',
+  IDLE = 'IDLE',
+  REQUESTING_PERMISSION = 'REQUESTING_PERMISSION',
+  INITIALIZING_CONTEXT = 'INITIALIZING_CONTEXT',
+  LOADING_WORKLET = 'LOADING_WORKLET',
+  READY = 'READY',
+  RECORDING = 'RECORDING',
+  STOPPING = 'STOPPING',
+  CLEANING_UP = 'CLEANING_UP',
+  ERROR = 'ERROR',
 }
 
 /**

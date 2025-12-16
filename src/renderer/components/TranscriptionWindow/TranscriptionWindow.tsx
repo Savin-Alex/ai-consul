@@ -20,25 +20,17 @@ const TranscriptionWindow: React.FC = () => {
 
   useEffect(() => {
     if (!window.electronAPI) {
-      console.warn('[TranscriptionWindow] electronAPI not available');
       return;
     }
 
     const handleUpdate = (data: TranscriptEntry[]) => {
-      console.log('[TranscriptionWindow] Received transcriptions update:', {
-        count: data?.length ?? 0,
-        entries: data?.map(t => t.text.substring(0, 50)) ?? []
-      });
-      setEntries(data || []);
+      setEntries(data);
     };
 
-    console.log('[TranscriptionWindow] Setting up transcriptions-update listener');
     window.electronAPI.on('transcriptions-update', handleUpdate);
 
     return () => {
-      if (window.electronAPI?.removeListener) {
-        window.electronAPI.removeListener('transcriptions-update', handleUpdate);
-      }
+      window.electronAPI?.removeListener?.('transcriptions-update', handleUpdate);
     };
   }, []);
 

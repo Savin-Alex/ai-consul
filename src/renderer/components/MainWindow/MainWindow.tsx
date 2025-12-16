@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './MainWindow.css';
-import { AudioCaptureManager, AudioChunk } from '../../utils/audio-capture';
-import { AudioState } from '../../utils/audio-state-manager';
+import { AudioCaptureManager, AudioChunk, AudioState } from '../../utils/audio-capture';
 import { useAppStore } from '../../stores/app-state';
 
 interface SessionStatus {
@@ -85,9 +84,48 @@ const MainWindow: React.FC = () => {
 
       // Send audio chunk to main process for processing
       if (window.electronAPI) {
-        // Convert Float32Array to base64 for IPC to preserve precision
-        // Float32Array -> Uint8Array -> base64 string (using loop to avoid stack overflow)
-        const uint8Array = new Uint8Array(audioChunk.data.buffer);
+        const audioData = audioChunk.data;
+        
+        // DEBUG: Log original audio data before encoding
+        let maxVal = 0;
+        let minVal = 0;
+        let sumAbs = 0;
+        for (let i = 0; i < Math.min(100, audioData.length); i++) {
+          const val = audioData[i];
+          if (val > maxVal) maxVal = val;
+          if (val < minVal) minVal = val;
+          sumAbs += Math.abs(val);
+        }
+        const avgAbs = sumAbs / Math.min(100, audioData.length);
+        
+        console.log('[renderer] BEFORE encoding - Original Float32Array:', {
+          length: audioData.length,
+          first10: Array.from(audioData.slice(0, 10)),
+          last10: Array.from(audioData.slice(-10)),
+          max: maxVal,
+          min: minVal,
+          avgAbs: avgAbs,
+          bufferByteLength: audioData.buffer.byteLength,
+          byteOffset: audioData.byteOffset,
+          byteLength: audioData.byteLength,
+        });
+        
+        // CRITICAL: Specify byteOffset and byteLength to get ONLY our data
+        // AudioWorklet may return views into larger shared buffers, so we must
+        // account for byteOffset to avoid encoding zeros from the entire buffer
+        const uint8Array = new Uint8Array(
+          audioData.buffer,
+          audioData.byteOffset,
+          audioData.byteLength
+        );
+        
+        console.log('[renderer] Uint8Array for encoding:', {
+          length: uint8Array.length,
+          first10: Array.from(uint8Array.slice(0, 10)),
+          last10: Array.from(uint8Array.slice(-10)),
+          expectedLength: audioData.length * 4, // Float32 = 4 bytes per sample
+        });
+        
         let binaryString = '';
         // Build binary string character by character to avoid stack overflow
         for (let i = 0; i < uint8Array.length; i++) {
@@ -97,12 +135,16 @@ const MainWindow: React.FC = () => {
         
         const chunkData = {
           data: base64Data, // Base64 encoded binary data
-          dataLength: audioChunk.data.length, // Original array length
+          dataLength: audioData.length, // Original array length
           sampleRate: audioChunk.sampleRate,
           channels: audioChunk.channels,
           timestamp: audioChunk.timestamp,
         };
-        console.log('[renderer] Sending audio chunk to main process');
+        console.log('[renderer] Sending audio chunk to main process:', {
+          dataLength: chunkData.dataLength,
+          base64Length: base64Data.length,
+          sampleRate: chunkData.sampleRate,
+        });
         window.electronAPI.send('audio-chunk', chunkData);
       } else {
         console.error('[renderer] window.electronAPI not available for sending audio chunk');
@@ -113,8 +155,8 @@ const MainWindow: React.FC = () => {
     // Listen for session status updates
     let checkReadyInterval: NodeJS.Timeout | null = null;
     const deviceChangeHandlers: Array<() => void> = [];
-    
-    // Store event handler references for cleanup
+
+    // Store handler references for cleanup (declare outside if block for scope)
     const sessionStatusHandler = (status: SessionStatus) => {
       setSessionStatus(status);
     };
@@ -132,7 +174,60 @@ const MainWindow: React.FC = () => {
       }
     };
 
+    // Store handler references for cleanup (declare outside if block for scope)
+    let startAudioCaptureHandler: ((config: AudioCaptureConfig) => Promise<void>) | null = null;
+    let stopAudioCaptureHandler: (() => Promise<void>) | null = null;
+
+    if (window.electronAPI) {
+      window.electronAPI.on('session-status', sessionStatusHandler);
+      window.electronAPI.on('error', errorHandler);
+      window.electronAPI.on('session-manager-ready', sessionManagerReadyHandler);
+
+      let attempts = 0;
+      const maxAttempts = 60;
+
+      const checkReady = () => {
+        attempts++;
+        if (attempts % 10 === 0) {
+          console.log(`Checking session manager ready (attempt ${attempts}/${maxAttempts})...`);
+        }
+        if (!window.electronAPI) {
+          console.error('window.electronAPI not available');
+          return;
+        }
+        window.electronAPI
+          .invoke('session-manager-ready')
+          .then((result: unknown) => {
+            const payload = result as SessionManagerReadyPayload | undefined;
+            if (payload?.ready) {
+              console.log('Session manager is ready! (via polling)');
+              setIsReady(true);
+              if (checkReadyInterval) {
+                clearInterval(checkReadyInterval);
+                checkReadyInterval = null;
+              }
+            } else if (attempts % 10 === 0) {
+              console.log('Session manager not ready yet, continuing to poll...');
+            }
+          })
+          .catch((err: unknown) => {
+            console.error('Error checking session manager ready:', err);
+          });
+
+        if (attempts >= maxAttempts) {
+          console.warn('Max polling attempts reached. Session manager may not be initialized.');
+          if (checkReadyInterval) {
+            clearInterval(checkReadyInterval);
+            checkReadyInterval = null;
+          }
+        }
+      };
+
+      checkReadyInterval = setInterval(checkReady, 500);
+    }
+
     // Subscribe to audio state changes (store handler reference for cleanup)
+    // Defined outside if block so it's accessible in cleanup
     const stateChangedHandler = (event: any) => {
       const newState = event.current as AudioState;
       setAudioState(newState);
@@ -172,10 +267,12 @@ const MainWindow: React.FC = () => {
     };
     manager.on('state-changed', stateChangedHandler);
 
-    // Store handler references for cleanup (declare outside if block)
-    // Use a flag to prevent concurrent handler executions
-    let isHandlingStart = false;
-    const startAudioCaptureHandler = async (config: AudioCaptureConfig) => {
+    if (window.electronAPI) {
+
+      // Store handler reference for cleanup
+      // Use a flag to prevent concurrent handler executions
+      let isHandlingStart = false;
+      startAudioCaptureHandler = async (config: AudioCaptureConfig) => {
         // Prevent concurrent handler executions
         if (isHandlingStart) {
           console.warn('[renderer] Start handler already executing, ignoring duplicate call');
@@ -271,9 +368,11 @@ const MainWindow: React.FC = () => {
         } finally {
           isHandlingStart = false;
         }
-    };
+      };
 
-    const stopAudioCaptureHandler = async () => {
+      window.electronAPI.on('start-audio-capture', startAudioCaptureHandler);
+
+      stopAudioCaptureHandler = async () => {
         console.log('[renderer] Received stop-audio-capture event');
         try {
           await manager.stopCapture();
@@ -282,56 +381,9 @@ const MainWindow: React.FC = () => {
           console.error('[renderer] Failed to stop audio capture:', err);
           setError(getErrorMessage(err) || 'Failed to stop audio capture');
         }
-    };
-
-    if (window.electronAPI) {
-      window.electronAPI.on('session-status', sessionStatusHandler);
-      window.electronAPI.on('error', errorHandler);
-      window.electronAPI.on('session-manager-ready', sessionManagerReadyHandler);
-      window.electronAPI.on('start-audio-capture', startAudioCaptureHandler);
-      window.electronAPI.on('stop-audio-capture', stopAudioCaptureHandler);
-
-      let attempts = 0;
-      const maxAttempts = 60;
-
-      const checkReady = () => {
-        attempts++;
-        if (attempts % 10 === 0) {
-          console.log(`Checking session manager ready (attempt ${attempts}/${maxAttempts})...`);
-        }
-        if (!window.electronAPI) {
-          console.error('window.electronAPI not available');
-          return;
-        }
-        window.electronAPI
-          .invoke('session-manager-ready')
-          .then((result: unknown) => {
-            const payload = result as SessionManagerReadyPayload | undefined;
-            if (payload?.ready) {
-              console.log('Session manager is ready! (via polling)');
-              setIsReady(true);
-              if (checkReadyInterval) {
-                clearInterval(checkReadyInterval);
-                checkReadyInterval = null;
-              }
-            } else if (attempts % 10 === 0) {
-              console.log('Session manager not ready yet, continuing to poll...');
-            }
-          })
-          .catch((err: unknown) => {
-            console.error('Error checking session manager ready:', err);
-          });
-
-        if (attempts >= maxAttempts) {
-          console.warn('Max polling attempts reached. Session manager may not be initialized.');
-          if (checkReadyInterval) {
-            clearInterval(checkReadyInterval);
-            checkReadyInterval = null;
-          }
-        }
       };
 
-      checkReadyInterval = setInterval(checkReady, 500);
+      window.electronAPI.on('stop-audio-capture', stopAudioCaptureHandler);
 
       (async () => {
         const devices = await manager.listInputDevices();
@@ -366,13 +418,18 @@ const MainWindow: React.FC = () => {
     }
 
     return () => {
-      // Remove IPC handlers
-      if (window.electronAPI?.removeListener) {
+      // Remove IPC handlers (handlers are in scope from above)
+      if (window.electronAPI) {
+        // Use removeListener (off is just an alias)
+        if (startAudioCaptureHandler) {
+          window.electronAPI.removeListener('start-audio-capture', startAudioCaptureHandler);
+        }
+        if (stopAudioCaptureHandler) {
+          window.electronAPI.removeListener('stop-audio-capture', stopAudioCaptureHandler);
+        }
         window.electronAPI.removeListener('session-status', sessionStatusHandler);
         window.electronAPI.removeListener('error', errorHandler);
         window.electronAPI.removeListener('session-manager-ready', sessionManagerReadyHandler);
-        window.electronAPI.removeListener('start-audio-capture', startAudioCaptureHandler);
-        window.electronAPI.removeListener('stop-audio-capture', stopAudioCaptureHandler);
       }
       
       // Remove audio manager event listeners

@@ -1,5 +1,3 @@
-import { AudioState } from './audio-state-manager';
-
 type Listener = (...args: unknown[]) => void;
 
 // Simple EventEmitter implementation for browser
@@ -31,12 +29,17 @@ class EventEmitter {
   }
 }
 
+import { AudioState } from './audio-state-manager';
+
 export interface AudioChunk {
   data: Float32Array;
   sampleRate: number;
   channels: number;
   timestamp: number;
 }
+
+// Re-export AudioState for convenience
+export { AudioState };
 
 export class AudioCaptureManager extends EventEmitter {
   private mediaStream: MediaStream | null = null;
@@ -51,25 +54,17 @@ export class AudioCaptureManager extends EventEmitter {
   private deviceId: string | undefined;
   private currentState: AudioState = AudioState.IDLE;
 
-  /**
-   * Get the current audio capture state
-   */
-  getState(): AudioState {
-    return this.currentState;
-  }
-
-  /**
-   * Update state and emit state-changed event
-   */
   private setState(newState: AudioState): void {
     if (this.currentState !== newState) {
-      const previousState = this.currentState;
+      const oldState = this.currentState;
       this.currentState = newState;
-      this.emit('state-changed', {
-        previous: previousState,
-        current: newState,
-      });
+      this.emit('state-changed', { old: oldState, current: newState });
+      console.log(`[AudioCaptureManager] State changed: ${oldState} -> ${newState}`);
     }
+  }
+
+  getState(): AudioState {
+    return this.currentState;
   }
 
   async startCapture(options: {
@@ -80,8 +75,11 @@ export class AudioCaptureManager extends EventEmitter {
     useAudioWorklet?: boolean;
   } = {}): Promise<void> {
     if (this.isCapturing) {
+      console.warn('[AudioCaptureManager] Already capturing, ignoring start request.');
       return;
     }
+
+    this.setState(AudioState.REQUESTING_PERMISSION);
 
     const sources = options.sources || ['microphone'];
     this.sampleRate = options.sampleRate || 16000;
@@ -90,24 +88,44 @@ export class AudioCaptureManager extends EventEmitter {
     this.useAudioWorklet = options.useAudioWorklet !== false; // Default to true
 
     try {
-      this.setState(AudioState.REQUESTING_PERMISSION);
-
       // For microphone, use getUserMedia
       if (sources.includes('microphone')) {
         const audioConstraints: MediaTrackConstraints = {
           sampleRate: this.sampleRate,
           channelCount: this.channels,
-          echoCancellation: true,
-          noiseSuppression: true,
+          // DISABLED: echoCancellation and noiseSuppression can filter out speech
+          // Enable these only if you have issues with echo/background noise
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false, // Also disable auto gain control
         };
 
         if (this.deviceId && this.deviceId !== 'default') {
           audioConstraints.deviceId = { exact: this.deviceId };
+          console.log('[audio-capture] Using specific microphone device:', this.deviceId);
+        } else {
+          console.log('[audio-capture] Using default microphone device');
         }
 
+        console.log('[audio-capture] Requesting microphone access with constraints:', audioConstraints);
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: audioConstraints,
         });
+        
+        // Log actual track settings (browser may override our constraints)
+        const audioTrack = stream.getAudioTracks()[0];
+        if (audioTrack) {
+          const settings = audioTrack.getSettings();
+          console.log('[audio-capture] Actual microphone settings:', {
+            deviceId: settings.deviceId,
+            label: audioTrack.label,
+            sampleRate: settings.sampleRate,
+            channelCount: settings.channelCount,
+            echoCancellation: settings.echoCancellation,
+            noiseSuppression: settings.noiseSuppression,
+            autoGainControl: settings.autoGainControl,
+          });
+        }
 
         this.setState(AudioState.INITIALIZING_CONTEXT);
         await this.setupAudioProcessing(stream);
@@ -118,8 +136,9 @@ export class AudioCaptureManager extends EventEmitter {
 
       this.isCapturing = true;
       this.setState(AudioState.RECORDING);
+      console.log('[AudioCaptureManager] Audio capture started successfully.');
     } catch (error) {
-      console.error('Failed to start audio capture:', error);
+      console.error('[AudioCaptureManager] Failed to start audio capture:', error);
       this.setState(AudioState.ERROR);
       throw error;
     }
@@ -128,11 +147,31 @@ export class AudioCaptureManager extends EventEmitter {
   private async setupAudioProcessing(stream: MediaStream): Promise<void> {
     this.mediaStream = stream;
     this.audioContext = new AudioContext({ sampleRate: this.sampleRate });
+    
+    // CRITICAL: Resume AudioContext if suspended (required for audio processing)
+    // AudioContext starts in 'suspended' state in many browsers and needs user interaction to resume
+    if (this.audioContext.state === 'suspended') {
+      console.log('[audio-capture] AudioContext is suspended, resuming...');
+      await this.audioContext.resume();
+      console.log('[audio-capture] AudioContext resumed, state:', this.audioContext.state);
+    }
+    
     // Update actual sample rate in case the browser chooses a different value
     if (this.audioContext.sampleRate && this.audioContext.sampleRate !== this.sampleRate) {
+      console.log('[audio-capture] Sample rate mismatch:', {
+        requested: this.sampleRate,
+        actual: this.audioContext.sampleRate,
+      });
       this.sampleRate = this.audioContext.sampleRate;
     }
+    
+    console.log('[audio-capture] Creating MediaStreamAudioSourceNode from stream');
     this.sourceNode = this.audioContext.createMediaStreamSource(stream);
+    console.log('[audio-capture] MediaStreamAudioSourceNode created:', {
+      numberOfInputs: this.sourceNode.numberOfInputs,
+      numberOfOutputs: this.sourceNode.numberOfOutputs,
+      channelCount: this.sourceNode.channelCount,
+    });
 
     // Try AudioWorklet first, fallback to ScriptProcessorNode
     if (this.useAudioWorklet && this.audioContext.audioWorklet) {
@@ -158,18 +197,53 @@ export class AudioCaptureManager extends EventEmitter {
     }
 
     try {
+      // CRITICAL: Resume AudioContext if suspended (required for audio processing)
+      if (this.audioContext.state === 'suspended') {
+        console.log('[audio-capture] AudioContext is suspended, resuming...');
+        await this.audioContext.resume();
+        console.log('[audio-capture] AudioContext resumed, state:', this.audioContext.state);
+      }
+
+      // Verify stream tracks are active
+      if (this.mediaStream) {
+        const audioTracks = this.mediaStream.getAudioTracks();
+        console.log('[audio-capture] Stream audio tracks:', audioTracks.map(track => ({
+          id: track.id,
+          label: track.label,
+          enabled: track.enabled,
+          muted: track.muted,
+          readyState: track.readyState,
+          settings: track.getSettings(),
+        })));
+        
+        // Ensure tracks are enabled (muted is read-only, can't change it)
+        audioTracks.forEach(track => {
+          if (!track.enabled) {
+            console.warn('[audio-capture] Audio track is disabled, enabling...');
+            track.enabled = true;
+          }
+          if (track.muted) {
+            console.warn('[audio-capture] WARNING: Audio track is muted (read-only, cannot change)');
+          }
+        });
+      }
+
       // Load the AudioWorklet processor module
       // In development, Vite serves public files at root, so use /core/audio/audio-worklet-processor.js
       // In production, files are in dist/renderer, so use the same path
       // The file is copied to src/renderer/public/core/audio/ during build
       const workletPath = new URL('/core/audio/audio-worklet-processor.js', window.location.href).href;
 
+      console.log('[audio-capture] Loading AudioWorklet from:', workletPath);
       await this.audioContext.audioWorklet.addModule(workletPath);
+      console.log('[audio-capture] AudioWorklet module loaded');
 
       // Create AudioWorkletNode
       this.audioWorkletNode = new AudioWorkletNode(this.audioContext, 'streaming-audio-processor');
+      console.log('[audio-capture] AudioWorkletNode created');
 
       // Set capturing flag BEFORE setting up message handler to prevent race condition
+      console.log('[audio-capture] Setting up AudioWorklet message handler');
       // This ensures messages are only processed when we're actually capturing
       const wasCapturing = this.isCapturing;
       this.isCapturing = true;
@@ -211,6 +285,31 @@ export class AudioCaptureManager extends EventEmitter {
             timestamp: (typeof timestamp === 'number' && timestamp > 0) ? timestamp : Date.now(),
           };
 
+          // Calculate max amplitude safely (avoid stack overflow)
+          let maxAmplitude = 0;
+          const sampleCount = Math.min(100, chunk.data.length);
+          for (let i = 0; i < sampleCount; i++) {
+            const abs = Math.abs(chunk.data[i]);
+            if (abs > maxAmplitude) maxAmplitude = abs;
+          }
+          
+          // Calculate average amplitude
+          let sumAbs = 0;
+          for (let i = 0; i < chunk.data.length; i++) {
+            sumAbs += Math.abs(chunk.data[i]);
+          }
+          const avgAmplitude = sumAbs / chunk.data.length;
+          
+          console.log('[audio-capture] Emitting audio-chunk event:', {
+            samples: chunk.data.length,
+            sampleRate: chunk.sampleRate,
+            channels: chunk.channels,
+            timestamp: chunk.timestamp,
+            maxAmplitude: maxAmplitude.toFixed(6),
+            avgAmplitude: avgAmplitude.toFixed(6),
+            first5Samples: Array.from(chunk.data.slice(0, 5)).map(v => v.toFixed(6)),
+            last5Samples: Array.from(chunk.data.slice(-5)).map(v => v.toFixed(6)),
+          });
           this.emit('audio-chunk', chunk);
         } else if (type === 'processor-ready') {
           console.log('[audio-capture] AudioWorklet processor ready', {
@@ -224,7 +323,22 @@ export class AudioCaptureManager extends EventEmitter {
       };
 
       // Connect the audio graph
+      console.log('[audio-capture] Connecting sourceNode to audioWorkletNode');
+      console.log('[audio-capture] SourceNode:', {
+        numberOfInputs: this.sourceNode.numberOfInputs,
+        numberOfOutputs: this.sourceNode.numberOfOutputs,
+        channelCount: this.sourceNode.channelCount,
+        channelCountMode: this.sourceNode.channelCountMode,
+      });
+      console.log('[audio-capture] AudioWorkletNode:', {
+        numberOfInputs: this.audioWorkletNode.numberOfInputs,
+        numberOfOutputs: this.audioWorkletNode.numberOfOutputs,
+        channelCount: this.audioWorkletNode.channelCount,
+        channelCountMode: this.audioWorkletNode.channelCountMode,
+      });
+      
       this.sourceNode.connect(this.audioWorkletNode);
+      console.log('[audio-capture] Audio graph connected');
       // Note: AudioWorkletNode doesn't need to connect to destination
       
       // Restore capturing state if it wasn't set
@@ -265,6 +379,13 @@ export class AudioCaptureManager extends EventEmitter {
         timestamp: Date.now(),
       };
 
+      console.log('[audio-capture] Emitting audio-chunk event (ScriptProcessor):', {
+        samples: chunk.data.length,
+        sampleRate: chunk.sampleRate,
+        channels: chunk.channels,
+        timestamp: chunk.timestamp,
+        maxAmplitude: Math.max(...Array.from(chunk.data.slice(0, 100).map(Math.abs))),
+      });
       this.emit('audio-chunk', chunk);
     };
 
@@ -273,7 +394,7 @@ export class AudioCaptureManager extends EventEmitter {
   }
 
   async stopCapture(): Promise<void> {
-    if (!this.isCapturing && this.currentState === AudioState.IDLE) {
+    if (!this.isCapturing) {
       return;
     }
 
@@ -281,8 +402,6 @@ export class AudioCaptureManager extends EventEmitter {
 
     // Set capturing to false first to stop processing new messages
     this.isCapturing = false;
-
-    this.setState(AudioState.CLEANING_UP);
 
     if (this.audioWorkletNode) {
       // Note: AudioWorklet processors can't receive messages directly in process()
@@ -322,6 +441,7 @@ export class AudioCaptureManager extends EventEmitter {
     }
 
     this.setState(AudioState.IDLE);
+    console.log('[AudioCaptureManager] Audio capture stopped successfully.');
   }
 
   getIsCapturing(): boolean {

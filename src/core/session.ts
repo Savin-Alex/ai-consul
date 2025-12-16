@@ -7,6 +7,7 @@ import { WhisperStreamingEngine, StreamingTranscript } from './audio/whisper-str
 import { SentenceAssembler, CompleteSentence } from './audio/sentence-assembler';
 import { AssemblyAIStreaming } from './audio/assemblyai-streaming';
 import { DeepgramStreaming } from './audio/deepgram-streaming';
+import { extractModelSize } from './config/transcription';
 
 interface TranscriptEntry {
   text: string;
@@ -398,14 +399,7 @@ export class SessionManager extends EventEmitter {
           if (process.env.DEBUG_AUDIO === 'true') {
             console.log('[session] Speech stopped, setting timeout to transcribe buffered audio');
           }
-          const timeoutId = setTimeout(() => {
-            // Additional safety: check if this timeout is still the current one
-            if (this.speechEndTimeout !== timeoutId) {
-              if (process.env.DEBUG_AUDIO === 'true') {
-                console.log('[session] Stale timeout, ignoring');
-              }
-              return;
-            }
+          this.speechEndTimeout = setTimeout(() => {
             if (this.speechBuffer.length > 0 && !this.isTranscribing && this.isActive) {
               if (process.env.DEBUG_AUDIO === 'true') {
                 console.log('[session] Speech end timeout triggered, transcribing buffered audio');
@@ -416,7 +410,6 @@ export class SessionManager extends EventEmitter {
             }
             this.speechEndTimeout = null;
           }, this.speechEndTimeoutMs);
-          this.speechEndTimeout = timeoutId;
         }
       }
     } catch (error) {
@@ -474,19 +467,22 @@ export class SessionManager extends EventEmitter {
         return;
       }
 
+      // Check minimum energy threshold before transcribing
+      // This prevents sending very quiet/noisy audio that Whisper will hallucinate on
+      const maxAmplitude = this.computeMaxAmplitude(audioToTranscribe);
+      const minEnergyThreshold = 0.015; // Minimum energy to consider for transcription
+      
+      if (maxAmplitude < minEnergyThreshold) {
+        if (process.env.DEBUG_AUDIO === 'true') {
+          console.log(`[session] Audio too quiet (${maxAmplitude.toFixed(4)} < ${minEnergyThreshold}), skipping transcription to avoid hallucinations`);
+        }
+        return;
+      }
+
       const transcription = await this.engine.transcribe(
         audioToTranscribe,
         this.targetSampleRate
       );
-
-      // DEBUG: Log raw transcription result to verify audio is reaching transcription engine
-      console.log('[session] RAW transcription result:', {
-        result: transcription,
-        type: typeof transcription,
-        length: transcription?.length,
-        isEmpty: !transcription || transcription.trim().length === 0,
-        preview: transcription?.substring(0, 100)
-      });
 
       if (process.env.DEBUG_AUDIO === 'true') {
         console.log('[session] Transcription result:', transcription);
@@ -499,15 +495,6 @@ export class SessionManager extends EventEmitter {
       }
 
       const trimmedText = transcription.trim();
-      
-      // Log all transcriptions for debugging (helps verify initial_prompt fix)
-      console.log('[session] Whisper output:', {
-        text: trimmedText,
-        length: trimmedText.length,
-        isMusic: this.isMusicOrNonSpeech(trimmedText),
-        willAccept: trimmedText.length > 2 && !this.isMusicOrNonSpeech(trimmedText)
-      });
-      
       if (
         trimmedText.length > 2 && // Filter out very short transcriptions that are likely noise
         !this.isMusicOrNonSpeech(trimmedText)
@@ -531,11 +518,9 @@ export class SessionManager extends EventEmitter {
             // Don't throw - suggestions are optional
           });
       } else {
-        // Always log filtered transcriptions to help debug hallucinations
-        console.log('[session] Filtered out transcription:', {
-          reason: trimmedText.length <= 2 ? 'too_short' : 'music_or_non_speech',
-          text: trimmedText
-        });
+        if (process.env.DEBUG_AUDIO === 'true' || this.isMusicOrNonSpeech(trimmedText)) {
+          console.log('[session] Filtered out transcription (music/non-speech):', trimmedText);
+        }
       }
     } catch (error) {
       console.error('[session] Transcription failed:', error);
@@ -727,13 +712,8 @@ export class SessionManager extends EventEmitter {
 
       // Initialize local streaming engine (always for hybrid mode or as fallback)
       if (this.streamingServiceType === 'local' || this.streamingServiceType === 'hybrid') {
-        // Determine model size
-        let modelSize: 'tiny' | 'base' | 'small' = 'base';
-        if (engineConfig.models.transcription.primary.includes('small')) {
-          modelSize = 'small';
-        } else if (engineConfig.models.transcription.primary.includes('tiny')) {
-          modelSize = 'tiny';
-        }
+        // Determine model size using shared utility function
+        const modelSize = extractModelSize(engineConfig.models.transcription.primary, 'small');
 
         // Create streaming engine
         this.streamingEngine = new WhisperStreamingEngine({
@@ -1052,53 +1032,12 @@ export class SessionManager extends EventEmitter {
   private sendTranscriptionsToUI(): void {
     const payload = this.transcripts;
 
-    // Send to transcript window
     if (this.transcriptWindow && !this.transcriptWindow.isDestroyed()) {
-      const webContents = this.transcriptWindow.webContents;
-      if (webContents && !webContents.isDestroyed()) {
-        try {
-          // Check if webContents is ready (not loading)
-          if (webContents.isLoading()) {
-            // Wait for load to finish, then send
-            webContents.once('did-finish-load', () => {
-              if (this.transcriptWindow && !this.transcriptWindow.isDestroyed() && !webContents.isDestroyed()) {
-                webContents.send('transcriptions-update', this.transcripts);
-                console.log('[session] Sent transcriptions to transcript window (after load):', {
-                  count: this.transcripts.length
-                });
-              }
-            });
-          } else {
-            // Window is ready, send immediately
-            webContents.send('transcriptions-update', payload);
-            console.log('[session] Sent transcriptions to transcript window:', {
-              count: payload.length,
-              entries: payload.map(t => t.text.substring(0, 50))
-            });
-          }
-        } catch (error) {
-          console.error('[session] Error sending transcriptions to transcript window:', error);
-        }
-      } else {
-        console.warn('[session] Transcript window webContents not available');
-      }
-    } else {
-      console.log('[session] Transcript window not available:', {
-        exists: this.transcriptWindow !== null,
-        destroyed: this.transcriptWindow?.isDestroyed() ?? true
-      });
+      this.transcriptWindow.webContents.send('transcriptions-update', payload);
     }
 
-    // Send to main window (for debugging/logging)
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      const webContents = this.mainWindow.webContents;
-      if (webContents && !webContents.isDestroyed()) {
-        try {
-          webContents.send('transcriptions-update', payload);
-        } catch (error) {
-          console.error('[session] Error sending transcriptions to main window:', error);
-        }
-      }
+      this.mainWindow.webContents.send('transcriptions-update', payload);
     }
   }
 

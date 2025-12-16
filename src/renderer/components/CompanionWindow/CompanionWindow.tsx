@@ -11,20 +11,11 @@ const CompanionWindow: React.FC = () => {
 
   useEffect(() => {
     // Listen for suggestions from main process
-    const suggestionsHandler = (data: Suggestion[]) => {
-      setSuggestions(data);
-    };
-    
     if (window.electronAPI) {
-      window.electronAPI.on('suggestions-update', suggestionsHandler);
+      window.electronAPI.on('suggestions-update', (data: Suggestion[]) => {
+        setSuggestions(data);
+      });
     }
-    
-    return () => {
-      // Clean up event listener
-      if (window.electronAPI?.off) {
-        window.electronAPI.off('suggestions-update', suggestionsHandler);
-      }
-    };
   }, []);
 
   if (suggestions.length === 0) {
