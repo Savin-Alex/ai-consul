@@ -90,9 +90,10 @@ export class AudioCaptureManager extends EventEmitter {
     try {
       // For microphone, use getUserMedia
       if (sources.includes('microphone')) {
+        // Start with ideal constraints (browser will use best available match)
         const audioConstraints: MediaTrackConstraints = {
-          sampleRate: this.sampleRate,
-          channelCount: this.channels,
+          sampleRate: { ideal: this.sampleRate }, // Use 'ideal' instead of exact value
+          channelCount: { ideal: this.channels },
           // DISABLED: echoCancellation and noiseSuppression can filter out speech
           // Enable these only if you have issues with echo/background noise
           echoCancellation: false,
@@ -101,16 +102,60 @@ export class AudioCaptureManager extends EventEmitter {
         };
 
         if (this.deviceId && this.deviceId !== 'default') {
+          // Try 'exact' first, but we'll fallback to 'ideal' if it fails
           audioConstraints.deviceId = { exact: this.deviceId };
-          console.log('[audio-capture] Using specific microphone device:', this.deviceId);
+          console.log('[audio-capture] Using specific microphone device (exact):', this.deviceId);
         } else {
           console.log('[audio-capture] Using default microphone device');
         }
 
         console.log('[audio-capture] Requesting microphone access with constraints:', audioConstraints);
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: audioConstraints,
-        });
+        
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: audioConstraints,
+          });
+        } catch (error) {
+          // If OverconstrainedError, try with more lenient constraints
+          if (error instanceof OverconstrainedError || error instanceof DOMException) {
+            console.warn('[audio-capture] OverconstrainedError, trying with lenient constraints:', error);
+            
+            // Fallback: use 'ideal' for deviceId and remove strict sampleRate
+            const fallbackConstraints: MediaTrackConstraints = {
+              sampleRate: { ideal: this.sampleRate },
+              channelCount: { ideal: this.channels },
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+            };
+            
+            if (this.deviceId && this.deviceId !== 'default') {
+              // Try 'ideal' instead of 'exact'
+              fallbackConstraints.deviceId = { ideal: this.deviceId };
+              console.log('[audio-capture] Retrying with deviceId (ideal):', this.deviceId);
+            }
+            
+            try {
+              stream = await navigator.mediaDevices.getUserMedia({
+                audio: fallbackConstraints,
+              });
+              console.log('[audio-capture] Successfully obtained stream with fallback constraints');
+            } catch (fallbackError) {
+              // Last resort: minimal constraints
+              console.warn('[audio-capture] Fallback also failed, trying minimal constraints:', fallbackError);
+              stream = await navigator.mediaDevices.getUserMedia({
+                audio: this.deviceId && this.deviceId !== 'default' 
+                  ? { deviceId: { ideal: this.deviceId } }
+                  : true,
+              });
+              console.log('[audio-capture] Successfully obtained stream with minimal constraints');
+            }
+          } else {
+            // Re-throw non-constraint errors
+            throw error;
+          }
+        }
         
         // Log actual track settings (browser may override our constraints)
         const audioTrack = stream.getAudioTracks()[0];
@@ -125,6 +170,15 @@ export class AudioCaptureManager extends EventEmitter {
             noiseSuppression: settings.noiseSuppression,
             autoGainControl: settings.autoGainControl,
           });
+          
+          // Update sampleRate to match actual stream sample rate (browser may have chosen different rate)
+          if (settings.sampleRate && settings.sampleRate !== this.sampleRate) {
+            console.log('[audio-capture] Updating sampleRate to match stream:', {
+              requested: this.sampleRate,
+              actual: settings.sampleRate,
+            });
+            this.sampleRate = settings.sampleRate;
+          }
         }
 
         this.setState(AudioState.INITIALIZING_CONTEXT);

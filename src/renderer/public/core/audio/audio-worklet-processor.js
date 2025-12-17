@@ -153,29 +153,6 @@ class StreamingAudioProcessor extends AudioWorkletProcessor {
       // Reset empty input counter when we receive valid audio
       this.consecutiveEmptyInputs = 0;
 
-      // DEBUG: Log audio input to verify we're receiving microphone data
-      let inputMax = 0;
-      let inputSumAbs = 0;
-      for (let i = 0; i < inputChannel.length; i++) {
-        const abs = Math.abs(inputChannel[i]);
-        if (abs > inputMax) inputMax = abs;
-        inputSumAbs += abs;
-      }
-      const inputAvgAbs = inputSumAbs / inputChannel.length;
-      
-      // Log first few chunks and any chunks with significant audio
-      if (this.samplesCollected < this.chunkSize * 3 || inputMax > 0.001 || inputAvgAbs > 0.0001) {
-        console.log('[AudioWorklet] Received audio input:', {
-          samples: inputChannel.length,
-          max: inputMax.toFixed(6),
-          avgAbs: inputAvgAbs.toFixed(6),
-          first5: Array.from(inputChannel.slice(0, 5)).map(v => v.toFixed(6)),
-          sourceSampleRate: this.sourceSampleRate,
-          targetSampleRate: this.targetSampleRate,
-          needsDownsampling: this.needsDownsampling,
-        });
-      }
-
       let processedAudio;
 
       if (this.needsDownsampling) {
